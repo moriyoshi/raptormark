@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "fuse",
+    srcs = [
+        "closure.go",
+        "ehframe.go",
+        "funcptr.go",
+        "fuse.go",
+        "ifunc.go",
+        "layout.go",
+        "relocptr.go",
+        "tables.go",
+        "unit.go",
+    ],
+    importpath = "raptormark/internal/fuse",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "fuse_test",
+    srcs = [
+        "closure_test.go",
+        "ehframe_test.go",
+        "funcptr_test.go",
+        "fuse_test.go",
+        "ifunc_test.go",
+        "layout_test.go",
+        "relocptr_test.go",
+        "symver_test.go",
+        "tables_test.go",
+        "tlsdesc_test.go",
+        "unit_test.go",
+    ],
+    embed = [":fuse"],
+)

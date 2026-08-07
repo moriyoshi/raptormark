@@ -1,0 +1,198 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index b714754..2b0f446 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -1053,6 +1053,75 @@ bool TryDecodeSTLRH_SL32_LDSTEXCL(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// Limited Ordering Region (LOR) load-acquire / store-release variants. Modeled as
++// full acquire/release -- a stronger barrier is always sound in elfconv's cooperative
++// single-threaded replay (ordering only matters at syscall boundaries). Stubbed
++// (return false) in Decode.cpp upstream; real decoders here mirror STLR/LDAR.
++
++// STLLRB  <Wt>, [<Xn|SP>{,#0}]
++bool TryDecodeSTLLRB_SL32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 8, data.Rn, 0);
++  return true;
++}
++
++// STLLRH  <Wt>, [<Xn|SP>{,#0}]
++bool TryDecodeSTLLRH_SL32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 16, data.Rn, 0);
++  return true;
++}
++
++// STLLR  <Wt>, [<Xn|SP>{,#0}]
++bool TryDecodeSTLLR_SL32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 32, data.Rn, 0);
++  return true;
++}
++
++// STLLR  <Xt>, [<Xn|SP>{,#0}]
++bool TryDecodeSTLLR_SL64_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionRead, kRegX, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 64, data.Rn, 0);
++  return true;
++}
++
++// LDLARB  <Wt>, [<Xn|SP>{,#0}]
++bool TryDecodeLDLARB_LR32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 8, data.Rn, 0);
++  return true;
++}
++
++// LDLARH  <Wt>, [<Xn|SP>{,#0}]
++bool TryDecodeLDLARH_LR32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 16, data.Rn, 0);
++  return true;
++}
++
++// LDLAR  <Wt>, [<Xn|SP>{,#0}]
++bool TryDecodeLDLAR_LR32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 32, data.Rn, 0);
++  return true;
++}
++
++// LDLAR  <Xt>, [<Xn|SP>{,#0}]
++bool TryDecodeLDLAR_LR64_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 64, data.Rn, 0);
++  return true;
++}
++
+ // STP  <Wt1>, <Wt2>, [<Xn|SP>, #<imm>]!
+ bool TryDecodeSTP_32_LDSTPAIR_PRE(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 512ab7d..60686a7 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -794,9 +794,7 @@ bool TryDecodeFCVT_HS_FLOATDP1(const InstData &, Instruction &) {
+ //  30 1 size     0
+ //  31 0 size     1
+ // LDLARH  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeLDLARH_LR32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLDLARH_LR32_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // LSRV LSR_LSRV_32_dp_2src:
+ //   0 x Rd       0
+@@ -5292,9 +5290,7 @@ bool TryDecodeUCVTF_ASIMDSHF_C(const InstData &, Instruction &) {
+ //  30 0 size     0
+ //  31 1 size     1
+ // STLLR  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeSTLLR_SL32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSTLLR_SL32_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // STLLR STLLR_SL64_ldstexcl:
+ //   0 x Rt       0
+@@ -5330,9 +5326,7 @@ bool TryDecodeSTLLR_SL32_LDSTEXCL(const InstData &, Instruction &) {
+ //  30 1 size     0
+ //  31 1 size     1
+ // STLLR  <Xt>, [<Xn|SP>{,#0}]
+-bool TryDecodeSTLLR_SL64_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSTLLR_SL64_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // SSUBL SSUBL_asimddiff_L:
+ //   0 x Rd       0
+@@ -6580,9 +6574,7 @@ bool TryDecodeFCMGE_ASIMDMISC_FZ(const InstData &, Instruction &) {
+ //  30 0 size     0
+ //  31 0 size     1
+ // STLLRB  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeSTLLRB_SL32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSTLLRB_SL32_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // FRINTZ FRINTZ_asimdmiscfp16_R:
+ //   0 x Rd       0
+@@ -6884,9 +6876,7 @@ bool TryDecodeFMINNMP_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 0 size     0
+ //  31 1 size     1
+ // LDLAR  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeLDLAR_LR32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLDLAR_LR32_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // LDLAR LDLAR_LR64_ldstexcl:
+ //   0 x Rt       0
+@@ -6922,9 +6912,7 @@ bool TryDecodeLDLAR_LR32_LDSTEXCL(const InstData &, Instruction &) {
+ //  30 1 size     0
+ //  31 1 size     1
+ // LDLAR  <Xt>, [<Xn|SP>{,#0}]
+-bool TryDecodeLDLAR_LR64_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLDLAR_LR64_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // SSHLL SSHLL_asimdshf_L:
+ //   0 x Rd       0
+@@ -12271,9 +12259,7 @@ bool TryDecodeSTLXRH_SR32_LDSTEXCL(const InstData &, Instruction &) {
+ //  30 1 size     0
+ //  31 0 size     1
+ // STLLRH  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeSTLLRH_SL32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSTLLRH_SL32_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // LDUMINAH LDUMINAH_32_memop:
+ //   0 x Rt       0
+@@ -22413,9 +22399,7 @@ bool TryDecodeFRINTP_ASIMDMISC_R(const InstData &, Instruction &) {
+ //  30 0 size     0
+ //  31 0 size     1
+ // LDLARB  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeLDLARB_LR32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLDLARB_LR32_LDSTEXCL: implemented in Arch.cpp (LOR store-release/load-acquire).
+ 
+ // FNEG FNEG_asimdmiscfp16_R:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index b92c8a2..22d136f 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -226,6 +226,10 @@ DEF_ISEL(STLR_SL32_LDSTEXCL) = StoreRelease<R32, M32W>;  // STLR  <Wt>, [<Xn|SP>
+ DEF_ISEL(STLR_SL64_LDSTEXCL) = StoreRelease<R64, M64W>;  // STLR  <Xt>, [<Xn|SP>{,#0}]
+ DEF_ISEL(STLRB_SL32_LDSTEXCL) = StoreRelease<R32, M8W>;  // STLRB  <Wt>, [<Xn|SP>{,#0}]
+ DEF_ISEL(STLRH_SL32_LDSTEXCL) = StoreRelease<R32, M16W>;  // STLRH  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(STLLRB_SL32_LDSTEXCL) = StoreRelease<R32, M8W>;  // STLLRB  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(STLLRH_SL32_LDSTEXCL) = StoreRelease<R32, M16W>;  // STLLRH  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(STLLR_SL32_LDSTEXCL) = StoreRelease<R32, M32W>;  // STLLR  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(STLLR_SL64_LDSTEXCL) = StoreRelease<R64, M64W>;  // STLLR  <Xt>, [<Xn|SP>{,#0}]
+ 
+ DEF_ISEL(STRB_32_LDST_POS) = Store<R32, M8W>;  // STRB  <Wt>, [<Xn|SP>{, #<pimm>}]
+ DEF_ISEL(STRB_32_LDST_IMMPOST) = StoreUpdateIndex<R32, M8W>;  // STRB  <Wt>, [<Xn|SP>], #<simm>
+@@ -909,6 +913,10 @@ DEF_ISEL(LDARB_LR32_LDSTEXCL) = LoadAcquire<M8>;  // LDARB  <Wt>, [<Xn|SP>{,#0}]
+ DEF_ISEL(LDARH_LR32_LDSTEXCL) = LoadAcquire<M16>;  // LDARH  <Wt>, [<Xn|SP>{,#0}]
+ DEF_ISEL(LDAR_LR32_LDSTEXCL) = LoadAcquire<M32>;  // LDAR  <Wt>, [<Xn|SP>{,#0}]
+ DEF_ISEL(LDAR_LR64_LDSTEXCL) = LoadAcquire<M64>;  // LDAR  <Xt>, [<Xn|SP>{,#0}]
++DEF_ISEL(LDLARB_LR32_LDSTEXCL) = LoadAcquire<M8>;  // LDLARB  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(LDLARH_LR32_LDSTEXCL) = LoadAcquire<M16>;  // LDLARH  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(LDLAR_LR32_LDSTEXCL) = LoadAcquire<M32>;  // LDLAR  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(LDLAR_LR64_LDSTEXCL) = LoadAcquire<M64>;  // LDLAR  <Xt>, [<Xn|SP>{,#0}]
+ 
+ namespace {
+ 

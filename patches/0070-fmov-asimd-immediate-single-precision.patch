@@ -1,0 +1,73 @@
+FMOV (vector, immediate), single-precision: implement the 2S/4S form.
+
+Patch 0010 implemented only `FMOV_ASIMDIMM_D2_D`; `TryDecodeFMOV_ASIMDIMM_S_S`
+stayed the generated `return false`. `fmov v1.2s, #1.0` is what a compiler emits
+for `v2f x = {1.0f, 1.0f}`, and this killed a test guest before any of its checks
+ran (TODO.md, verified 2026-08-11 and re-verified 2026-08-25 in patch 0010's own
+diff context).
+
+The operand shape is `MOVI_ASIMDIMM_L_SL`'s exactly -- arrangement specifier,
+one written vector register, one 32-bit immediate -- so it reuses `MOVI_L_SL` as
+its semantics and adds no new DEF_SEM. The only difference from MOVI is how the
+immediate is built: `VFPExpandImmToFloat32` (already present, used by the scalar
+FMOV forms) expands imm8 into an IEEE-754 single bit pattern where MOVI shifts
+it.
+
+⚠️ Generated against the tree with patches 0001-0069 ALREADY APPLIED, because
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -21697,9 +21697,6 @@
+ //  30 x Q        0
+ //  31 0
+ // FMOV  <Vd>.<T>, #<imm>
+-bool TryDecodeFMOV_ASIMDIMM_S_S(const InstData &, Instruction &) {
+-  return false;
+-}
+ 
+ // FMOV FMOV_asimdimm_D2_d:
+ //   0 x Rd       0
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7519,6 +7519,31 @@
+ // The abcdefgh imm8 expands to an IEEE-754 double via VFPExpandImmToFloat64
+ // (returns the raw 64-bit pattern); both D lanes get that value, which is exactly
+ // the MOVI_D2 (I64 replicate) semantic reused here.
++// FMOV  <Vd>.<T>, #<imm>   (T = 2S or 4S)
++//
++// The single-precision sibling of FMOV_ASIMDIMM_D2_D below, which patch 0010
++// added. `fmov v1.2s, #1.0` is what a compiler emits for `v2f x = {1.0f, 1.0f}`,
++// and this being a stub killed a test guest before any of its checks ran.
++//
++// The operand shape is MOVI_ASIMDIMM_L_SL's exactly -- an arrangement specifier,
++// a written vector register, and one 32-bit immediate -- so it reuses MOVI_L_SL
++// as its semantics and needs no new DEF_SEM.
++//
++// ❗ THE IMMEDIATE IS ConcatABCDEFGHToU8(data), NOT data.imm8.uimm. `imm8` is the
++// SCALAR FMOV field; the vector ASIMDIMM format splits abcdefgh across bits
++// [18:16] and [9:5], which is what every other ASIMDIMM decoder in this file
++// reads. The first version of this patch copied `data.imm8.uimm` from the D2_D
++// form below: it DECODED cleanly and produced 2.0 for `fmov v1.2s, #1.0` -- a
++// silently wrong constant, caught only by running a guest and diffing against
++// the native result.
++bool TryDecodeFMOV_ASIMDIMM_S_S(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddQArrangementSpecifier(data, inst, "4S", "2S");
++  AddRegOperand(inst, kActionWrite, data.Q ? kReg4S : kReg2S, kUseAsValue, data.Rd);
++  AddImmOperand(inst, VFPExpandImmToFloat32(ConcatABCDEFGHToU8(data)), kUnsigned, 32);
++  return true;
++}
++
+ bool TryDecodeFMOV_ASIMDIMM_D2_D(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+   AddRegOperand(inst, kActionWrite, kReg2D, kUseAsValue, data.Rd);
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1960,6 +1960,8 @@
+ DEF_ISEL(MOVI_ASIMDIMM_D2_D) = MOVI_D2;  // MOVI  <Vd>.2D, #<imm>
+ // FMOV <Vd>.2D, #<imm>: the decoder (Arch.cpp) expands the imm8 to the double's
+ // 64-bit pattern, so replicating that I64 into both D lanes is the MOVI_D2 semantic.
++DEF_ISEL(FMOV_ASIMDIMM_S_S_2S) = MOVI_L_SL<VIu32v2>;  // FMOV  <Vd>.2S, #<imm>
++DEF_ISEL(FMOV_ASIMDIMM_S_S_4S) = MOVI_L_SL<VIu32v4>;  // FMOV  <Vd>.4S, #<imm>
+ DEF_ISEL(FMOV_ASIMDIMM_D2_D) = MOVI_D2;  // FMOV  <Vd>.2D, #<imm>
+ DEF_ISEL(MOVI_ASIMDIMM_N_B_8B) = MOVI_N_B<VIu8v8>;  // MOVI  <Vd>.<T>, #<imm8>{, LSL #0}
+ DEF_ISEL(MOVI_ASIMDIMM_N_B_16B) = MOVI_N_B<VIu8v16>;  // MOVI  <Vd>.<T>, #<imm8>{, LSL #0}

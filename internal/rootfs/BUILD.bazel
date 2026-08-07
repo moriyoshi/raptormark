@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "rootfs",
+    srcs = [
+        "boot.go",
+        "owner_unix.go",
+        "resolve.go",
+        "rfs.go",
+    ],
+    importpath = "raptormark/internal/rootfs",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/link"],
+)
+
+# ⚠️ NOT run by `bazel test //...`. TestMaxLinksMatchesTheRuntime reads
+# ../../runtime/src/vfs/mod.rs -- the runtime resolver is the specification for
+# that file -- and Bazel's sandbox does not have it. `go test ./...` does, and
+# that is the Go gate. See the longer note in //internal/builder.
+go_test(
+    name = "rootfs_test",
+    srcs = [
+        "dlmap_test.go",
+        "execmap_test.go",
+        "resolve_test.go",
+        "rfs_test.go",
+        "runtimeagree_test.go",
+        "statmode_test.go",
+    ],
+    embed = [":rootfs"],
+    tags = ["manual"],  # keep
+    deps = ["//internal/link"],
+)

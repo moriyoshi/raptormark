@@ -1,0 +1,30 @@
+diff --git a/lifter/CMakeLists.txt b/lifter/CMakeLists.txt
+--- a/lifter/CMakeLists.txt
++++ b/lifter/CMakeLists.txt
+@@ -27,7 +27,11 @@
+ 
+ set_target_properties(elflift PROPERTIES
+   POSITION_INDEPENDENT_CODE ON
+-  COMPILE_FLAGS "-O3 -fPIC"
++  # -fno-omit-frame-pointer -g are for PROFILING ONLY: without frame pointers a
++  # CPU profiler sees std:: frames as leaves and cannot name their callers, which
++  # is how a wrong guess at the hot std::map cost a build cycle (see JOURNAL).
++  # They change the binary, not the emitted bitcode.
++  COMPILE_FLAGS "-O3 -fPIC -fno-omit-frame-pointer -g"
+ )
+ 
+ if(CMAKE_ELFCONV_AARCH64_BUILD)
+diff --git a/backend/remill/lib/BC/CMakeLists.txt b/backend/remill/lib/BC/CMakeLists.txt
+--- a/backend/remill/lib/BC/CMakeLists.txt
++++ b/backend/remill/lib/BC/CMakeLists.txt
+@@ -42,6 +42,10 @@
+ 
+ set_property(TARGET remill_bc PROPERTY POSITION_INDEPENDENT_CODE ON)
+ 
++# Profiling only, as in lifter/CMakeLists.txt: TraceLifter.cpp is where the lift
++# actually spends its time, so the caller graph has to resolve here.
++target_compile_options(remill_bc PRIVATE -fno-omit-frame-pointer -g)
++
+ target_link_libraries(remill_bc LINK_PRIVATE
+   remill_settings
+ )

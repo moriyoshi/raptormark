@@ -1,0 +1,349 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..9712a2f 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5594,6 +5594,123 @@ bool TryDecodeFMLA_ASIMDELEM_R_SD(const InstData &data, Instruction &inst) {
+ }
+ 
+ // FADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++// FCM{EQ,GE,GT}: float compare producing a MASK, all ones or all zeros.
++//
++// Every form of these was a decode stub. postgres reaches the scalar single
++// form in `expanded_record_set_fields`, which is what plpgsql exercises, so
++// initdb stopped there once the extension loaded.
++//
++// Four shapes, one decoder each:
++//   ASIMDSAME  vector, register-register     <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++//   ASISDSAME  scalar, register-register     <V><d>, <V><n>, <V><m>
++//   ASIMDMISC  vector, against zero          <Vd>.<T>, <Vn>.<T>, #0.0
++//   ASISDMISC  scalar, against zero          <V><d>, <V><n>, #0.0
++//
++// The SCALAR destination is written through the smallest vector view rather
++// than kRegS/kRegD, for two reasons: the result is an integer mask and those
++// classes are float, and writing Sd/Dd architecturally zeroes the rest of Vd,
++// which a {mask, 0} vector write expresses exactly. There is no kReg1S, so the
++// single-precision scalar uses kReg2S with the upper lane written zero.
++static bool TryDecodeFCM_ASIMDSAME(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.sz && !data.Q) {
++    return false;  // 1D is unallocated
++  }
++  const uint64_t total_size = data.Q ? 128 : 64;
++  const uint64_t elem_size = data.sz ? 64 : 32;
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  auto rclass = ArrangementRegClass(total_size, elem_size, true);
++  AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
++static bool TryDecodeFCM_ASISDSAME(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  auto rclass = data.sz ? kReg1D : kReg2S;
++  std::stringstream ss;
++  ss << inst.function << (data.sz ? "_D" : "_S");
++  inst.function = ss.str();
++  AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
++static bool TryDecodeFCM_ASIMDMISC_FZ(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.sz && !data.Q) {
++    return false;
++  }
++  const uint64_t total_size = data.Q ? 128 : 64;
++  const uint64_t elem_size = data.sz ? 64 : 32;
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  auto rclass = ArrangementRegClass(total_size, elem_size, true);
++  AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  return true;
++}
++
++static bool TryDecodeFCM_ASISDMISC_FZ(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  auto rclass = data.sz ? kReg1D : kReg2S;
++  std::stringstream ss;
++  ss << inst.function << (data.sz ? "_D" : "_S");
++  inst.function = ss.str();
++  AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCMEQ_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASIMDSAME(data, inst);
++}
++
++bool TryDecodeFCMEQ_ASISDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASISDSAME(data, inst);
++}
++
++bool TryDecodeFCMEQ_ASIMDMISC_FZ(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASIMDMISC_FZ(data, inst);
++}
++
++bool TryDecodeFCMEQ_ASISDMISC_FZ(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASISDMISC_FZ(data, inst);
++}
++
++bool TryDecodeFCMGE_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASIMDSAME(data, inst);
++}
++
++bool TryDecodeFCMGE_ASISDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASISDSAME(data, inst);
++}
++
++bool TryDecodeFCMGE_ASIMDMISC_FZ(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASIMDMISC_FZ(data, inst);
++}
++
++bool TryDecodeFCMGE_ASISDMISC_FZ(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASISDMISC_FZ(data, inst);
++}
++
++bool TryDecodeFCMGT_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASIMDSAME(data, inst);
++}
++
++bool TryDecodeFCMGT_ASISDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASISDSAME(data, inst);
++}
++
++bool TryDecodeFCMGT_ASIMDMISC_FZ(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASIMDMISC_FZ(data, inst);
++}
++
++bool TryDecodeFCMGT_ASISDMISC_FZ(const InstData &data, Instruction &inst) {
++  return TryDecodeFCM_ASISDMISC_FZ(data, inst);
++}
++
+ bool TryDecodeFADD_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::State;
+   uint64_t total_size, elem_size;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..2d9a896 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -4803,9 +4803,7 @@ bool TryDecodeFCMEQ_ASISDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // FCMEQ  <V><d>, <V><n>, <V><m>
+-bool TryDecodeFCMEQ_ASISDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMEQ_ASISDSAME_ONLY: implemented in Arch.cpp (float compare mask).
+ 
+ // FCMEQ FCMEQ_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -4879,9 +4877,7 @@ bool TryDecodeFCMEQ_ASIMDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCMEQ  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+-bool TryDecodeFCMEQ_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMEQ_ASIMDSAME_ONLY: implemented in Arch.cpp (float compare mask).
+ 
+ // CLREX CLREX_BN_system:
+ //   0 1 Rt       0
+@@ -6472,9 +6468,7 @@ bool TryDecodeFCMGE_ASISDMISCFP16_FZ(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // FCMGE  <V><d>, <V><n>, #0.0
+-bool TryDecodeFCMGE_ASISDMISC_FZ(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGE_ASISDMISC_FZ: implemented in Arch.cpp (float compare mask).
+ 
+ // FCMGE FCMGE_asimdmiscfp16_FZ:
+ //   0 x Rd       0
+@@ -6548,9 +6542,7 @@ bool TryDecodeFCMGE_ASIMDMISCFP16_FZ(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCMGE  <Vd>.<T>, <Vn>.<T>, #0.0
+-bool TryDecodeFCMGE_ASIMDMISC_FZ(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGE_ASIMDMISC_FZ: implemented in Arch.cpp (float compare mask).
+ 
+ // STLLRB STLLRB_SL32_ldstexcl:
+ //   0 x Rt       0
+@@ -8038,9 +8030,7 @@ bool TryDecodeFCMGT_ASISDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // FCMGT  <V><d>, <V><n>, <V><m>
+-bool TryDecodeFCMGT_ASISDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGT_ASISDSAME_ONLY: implemented in Arch.cpp (float compare mask).
+ 
+ // FCMGT FCMGT_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -8114,9 +8104,7 @@ bool TryDecodeFCMGT_ASIMDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCMGT  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+-bool TryDecodeFCMGT_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGT_ASIMDSAME_ONLY: implemented in Arch.cpp (float compare mask).
+ 
+ // USUBW USUBW_asimddiff_W:
+ //   0 x Rd       0
+@@ -26129,9 +26117,7 @@ bool TryDecodeFCMGE_ASISDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // FCMGE  <V><d>, <V><n>, <V><m>
+-bool TryDecodeFCMGE_ASISDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGE_ASISDSAME_ONLY: implemented in Arch.cpp (float compare mask).
+ 
+ // FCMGE FCMGE_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -26205,9 +26191,7 @@ bool TryDecodeFCMGE_ASIMDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCMGE  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+-bool TryDecodeFCMGE_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGE_ASIMDSAME_ONLY: implemented in Arch.cpp (float compare mask).
+ 
+ // NOT MVN_NOT_asimdmisc_R:
+ //   0 x Rd       0
+@@ -26927,9 +26911,7 @@ bool TryDecodeFCMGT_ASISDMISCFP16_FZ(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // FCMGT  <V><d>, <V><n>, #0.0
+-bool TryDecodeFCMGT_ASISDMISC_FZ(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGT_ASISDMISC_FZ: implemented in Arch.cpp (float compare mask).
+ 
+ // FCMGT FCMGT_asimdmiscfp16_FZ:
+ //   0 x Rd       0
+@@ -27003,9 +26985,7 @@ bool TryDecodeFCMGT_ASIMDMISCFP16_FZ(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCMGT  <Vd>.<T>, <Vn>.<T>, #0.0
+-bool TryDecodeFCMGT_ASIMDMISC_FZ(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMGT_ASIMDMISC_FZ: implemented in Arch.cpp (float compare mask).
+ 
+ // UQSUB UQSUB_asisdsame_only:
+ //   0 x Rd       0
+@@ -27497,9 +27477,7 @@ bool TryDecodeFCMEQ_ASISDMISCFP16_FZ(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // FCMEQ  <V><d>, <V><n>, #0.0
+-bool TryDecodeFCMEQ_ASISDMISC_FZ(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMEQ_ASISDMISC_FZ: implemented in Arch.cpp (float compare mask).
+ 
+ // FCMEQ FCMEQ_asimdmiscfp16_FZ:
+ //   0 x Rd       0
+@@ -27573,9 +27551,7 @@ bool TryDecodeFCMEQ_ASIMDMISCFP16_FZ(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCMEQ  <Vd>.<T>, <Vn>.<T>, #0.0
+-bool TryDecodeFCMEQ_ASIMDMISC_FZ(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCMEQ_ASIMDMISC_FZ: implemented in Arch.cpp (float compare mask).
+ 
+ // FACGE FACGE_asisdsamefp16_only:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index f35c709..06ca8df 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -1374,6 +1374,80 @@ DEF_ISEL(FMUL_ASIMDSAME_ONLY_2S) = FMUL_V32<VIf32v2>;  // FMUL  <Vd>.<T>, <Vn>.<
+ DEF_ISEL(FMUL_ASIMDSAME_ONLY_4S) = FMUL_V32<VIf32v4>;  // FMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ DEF_ISEL(FMUL_ASIMDSAME_ONLY_2D) = FMUL_V64<VIf64v2>;  // FMUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ 
++// FCM{EQ,GE,GT}: an all-ones / all-zeros mask per element.
++//
++// NaN must compare FALSE for all three, which C++'s ==, >= and > already do --
++// the reference run confirms `fcmgt s (NaN>1)` and `fcmeq s (NaN==NaN)` are
++// both 00000000. Written as a mask rather than a bool because that is what the
++// caller consumes: postgres does `fcmgt` then `fmov w0, s31` and reads the bits.
++namespace {
++
++#define MAKE_FCM_VECTOR(name, op, bits) \
++  template <typename S, typename D> \
++  DEF_SEM_T(name##_V##bits, S a, S b) { \
++    auto av = FReadVI##bits(a); \
++    auto bv = FReadVI##bits(b); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(av); i++) { \
++      res[i] = (av[i] op bv[i]) ? ~uint##bits##_t(0) : uint##bits##_t(0); \
++    } \
++    return res; \
++  } \
++  template <typename S, typename D> \
++  DEF_SEM_T(name##_VZ##bits, S a) { \
++    auto av = FReadVI##bits(a); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(av); i++) { \
++      res[i] = (av[i] op float##bits##_t(0)) ? ~uint##bits##_t(0) : uint##bits##_t(0); \
++    } \
++    return res; \
++  }
++
++MAKE_FCM_VECTOR(FCMEQ, ==, 32)
++MAKE_FCM_VECTOR(FCMEQ, ==, 64)
++MAKE_FCM_VECTOR(FCMGE, >=, 32)
++MAKE_FCM_VECTOR(FCMGE, >=, 64)
++MAKE_FCM_VECTOR(FCMGT, >, 32)
++MAKE_FCM_VECTOR(FCMGT, >, 64)
++
++#undef MAKE_FCM_VECTOR
++
++}  // namespace
++
++
++DEF_ISEL(FCMEQ_ASIMDSAME_ONLY_2S) = FCMEQ_V32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMEQ_ASIMDSAME_ONLY_4S) = FCMEQ_V32<VIf32v4, VIu32v4>;
++DEF_ISEL(FCMEQ_ASIMDSAME_ONLY_2D) = FCMEQ_V64<VIf64v2, VIu64v2>;
++DEF_ISEL(FCMEQ_ASISDSAME_ONLY_S) = FCMEQ_V32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMEQ_ASISDSAME_ONLY_D) = FCMEQ_V64<VIf64v1, VIu64v1>;
++DEF_ISEL(FCMEQ_ASIMDMISC_FZ_2S) = FCMEQ_VZ32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMEQ_ASIMDMISC_FZ_4S) = FCMEQ_VZ32<VIf32v4, VIu32v4>;
++DEF_ISEL(FCMEQ_ASIMDMISC_FZ_2D) = FCMEQ_VZ64<VIf64v2, VIu64v2>;
++DEF_ISEL(FCMEQ_ASISDMISC_FZ_S) = FCMEQ_VZ32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMEQ_ASISDMISC_FZ_D) = FCMEQ_VZ64<VIf64v1, VIu64v1>;
++
++DEF_ISEL(FCMGE_ASIMDSAME_ONLY_2S) = FCMGE_V32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGE_ASIMDSAME_ONLY_4S) = FCMGE_V32<VIf32v4, VIu32v4>;
++DEF_ISEL(FCMGE_ASIMDSAME_ONLY_2D) = FCMGE_V64<VIf64v2, VIu64v2>;
++DEF_ISEL(FCMGE_ASISDSAME_ONLY_S) = FCMGE_V32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGE_ASISDSAME_ONLY_D) = FCMGE_V64<VIf64v1, VIu64v1>;
++DEF_ISEL(FCMGE_ASIMDMISC_FZ_2S) = FCMGE_VZ32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGE_ASIMDMISC_FZ_4S) = FCMGE_VZ32<VIf32v4, VIu32v4>;
++DEF_ISEL(FCMGE_ASIMDMISC_FZ_2D) = FCMGE_VZ64<VIf64v2, VIu64v2>;
++DEF_ISEL(FCMGE_ASISDMISC_FZ_S) = FCMGE_VZ32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGE_ASISDMISC_FZ_D) = FCMGE_VZ64<VIf64v1, VIu64v1>;
++
++DEF_ISEL(FCMGT_ASIMDSAME_ONLY_2S) = FCMGT_V32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGT_ASIMDSAME_ONLY_4S) = FCMGT_V32<VIf32v4, VIu32v4>;
++DEF_ISEL(FCMGT_ASIMDSAME_ONLY_2D) = FCMGT_V64<VIf64v2, VIu64v2>;
++DEF_ISEL(FCMGT_ASISDSAME_ONLY_S) = FCMGT_V32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGT_ASISDSAME_ONLY_D) = FCMGT_V64<VIf64v1, VIu64v1>;
++DEF_ISEL(FCMGT_ASIMDMISC_FZ_2S) = FCMGT_VZ32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGT_ASIMDMISC_FZ_4S) = FCMGT_VZ32<VIf32v4, VIu32v4>;
++DEF_ISEL(FCMGT_ASIMDMISC_FZ_2D) = FCMGT_VZ64<VIf64v2, VIu64v2>;
++DEF_ISEL(FCMGT_ASISDMISC_FZ_S) = FCMGT_VZ32<VIf32v2, VIu32v2>;
++DEF_ISEL(FCMGT_ASISDMISC_FZ_D) = FCMGT_VZ64<VIf64v1, VIu64v1>;
++
+ DEF_ISEL(FADD_ASIMDSAME_ONLY_2S) = FADD_V32<VIf32v2>;  // FADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ DEF_ISEL(FADD_ASIMDSAME_ONLY_4S) = FADD_V32<VIf32v4>;  // FADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ DEF_ISEL(FADD_ASIMDSAME_ONLY_2D) = FADD_V64<VIf64v2>;  // FADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>

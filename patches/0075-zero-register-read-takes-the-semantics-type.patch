@@ -1,0 +1,84 @@
+A zero-register read must take the SEMANTICS' type, not its natural width.
+
+`LiftRegisterOperand` special-cases `XZR`/`WZR` by returning a constant zero,
+and it does so with an EARLY RETURN -- before the val_size/arg_size adjustment
+that every real register falls through to:
+
+    if (31 == op.reg.number) {
+      if ("XZR" == op.reg.name) return ConstantInt::get(getInt64Ty(context), 0);
+      else if ("WZR" == op.reg.name) return ConstantInt::get(getInt32Ty(context), 0);
+    }
+    auto val = LoadRegValue(...);
+    ...
+    } else if (val_size > arg_size) {
+      val = new llvm::TruncInst(val, arg_type, ...);   // <- real registers only
+
+So a semantic whose parameter is narrower than the register got the wrong type
+whenever the operand was the zero register. `STLXRB` is `STLXR<R8, M8W>`, and
+its decoder adds `kRegW` for Rt, so:
+
+    stlxrb w27, w5,  [x0]   ->  i32 loaded, TRUNCATED to i8   -- fine
+    stlxrb w27, wzr, [x0]   ->  i32 constant, no truncation   -- FATAL
+
+    Check failed: op_type == arg_type ... Lifted operand (READ_OP (REG_32 WZR))
+    to STLXRB_SR32_LDSTEXCL does not have the correct type. Expected i8 but got
+    i32. arg_num: 2, address: 162792
+
+❗ This is why it looked like a Go VERSION problem and is not. Measured
+2026-09-01: a Go 1.26 hello-world carries three `stlxrb ..., wzr, ...`
+(encoding 0x081bfc1f, the first at 0x27BE8 = the 162792 in the message) and
+could not be lifted at all; `gosu`, built with Go 1.24, carries none and lifts.
+Both carry plenty of `stlxrb`/`ldaxrb` otherwise -- 48 and 66 -- so the
+instruction is not new, only that operand.
+
+The fix takes the argument type when it is an integer. Zero is zero at every
+width, and for the i64/i32 parameters this is exactly what the old code
+produced, so the wide cases are unchanged by construction. A non-integer
+parameter keeps the historical widths rather than guessing; no semantic is known
+to read a zero register into one.
+
+⚠️ Not limited to STLXRB. Every byte- and halfword-width semantic that can take
+the zero register was affected the same way -- STXRB, STLXRH, STXRH and the
+plain STRB/STRH/STLRB/STLRH family among them.
+
+--- a/backend/remill/lib/BC/InstructionLifter.cpp
++++ b/backend/remill/lib/BC/InstructionLifter.cpp
+@@ -605,9 +605,35 @@
+         << "for instruction at 0x" << std::hex << inst.pc;
+ 
+     if (31 == op.reg.number) {
+-      if ("XZR" == op.reg.name) {
+-        return llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0);
+-      } else if ("WZR" == op.reg.name) {
++      if ("XZR" == op.reg.name || "WZR" == op.reg.name) {
++        // ❗ The constant must have the SEMANTICS' argument type, not the
++        // register's natural width.
++        //
++        // This returns EARLY, before the val_size/arg_size adjustment below, so
++        // a zero register never reaches the `TruncInst` that every real
++        // register goes through. Hard-coding i64/i32 here therefore produced a
++        // type mismatch for any semantic that takes a narrower operand --
++        // `STLXRB` is `STLXR<R8, M8W>`, so `stlxrb Ws, wzr, [Xn]` handed an i32
++        // to an i8 parameter and elflift died on
++        //
++        //   Check failed: op_type == arg_type ... Expected i8 but got i32
++        //
++        // while `stlxrb Ws, w5, [Xn]` lifted fine, because a real register IS
++        // truncated below. Measured 2026-09-01: a Go 1.26 hello-world contains
++        // three `stlxrb ..., wzr, ...` (0x081bfc1f) and could not be lifted at
++        // all; gosu (Go 1.24) contains none and lifted.
++        //
++        // Zero is zero at every width, so taking the argument type is right for
++        // the wide cases too -- for an i64 or i32 parameter this is exactly what
++        // the old code produced.
++        if (arg_type->isIntegerTy()) {
++          return llvm::ConstantInt::get(arg_type, 0);
++        }
++        // Not an integer parameter: keep the historical widths rather than
++        // guess. No such semantic is known to read a zero register.
++        if ("XZR" == op.reg.name) {
++          return llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), 0);
++        }
+         return llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0);
+       }
+     }

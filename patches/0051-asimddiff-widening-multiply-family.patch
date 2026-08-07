@@ -1,0 +1,250 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index 883c50c..4569cf9 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7746,6 +7746,58 @@ bool TryDecodeSMLAL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// The rest of the ASIMDDIFF widening-multiply family, which SMLAL{2} left
++// behind. They share SMLAL's operand shape exactly -- two narrow source
++// vectors, one wide destination, the `2` variant selecting the high half via
++// data.Q -- and differ only in signedness and in whether the destination
++// accumulates. The decoder therefore differs in one thing: MULL WRITES its
++// destination, MLAL/MLSL READ-WRITE it.
++//
++// They come as a group because autovectorized code emits them as a group:
++// redis's lifted image stopped at a `umull v18.4s, v17.4h, v30.4h` sitting one
++// instruction away from a `umull2`, both inside a loop that already decoded its
++// `uaddw`/`uaddw2` neighbours.
++
++// UMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- unsigned multiply long.
++bool TryDecodeUMULL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.size == 0b11) {
++    return false;
++  }
++  uint64_t d_tsize, s_tsize, d_esize, s_esize;
++  d_tsize = 128;
++  s_tsize = data.Q ? 128 : 64;
++  d_esize = 16 << data.size;
++  s_esize = 8 << data.size;
++  AddArrangementSpecifierUSHLL(inst, d_tsize, d_esize, s_tsize, s_esize);
++  auto d_rclass = ArrangementRegClass(d_tsize, d_esize);
++  auto s_rclass = ArrangementRegClass(s_tsize, s_esize);
++  AddRegOperand(inst, kActionWrite, d_rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, s_rclass, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, s_rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
++// SMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- signed multiply long.
++bool TryDecodeSMULL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  return TryDecodeUMULL_ASIMDDIFF_L(data, inst);
++}
++
++// UMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- unsigned multiply-accumulate.
++bool TryDecodeUMLAL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  return TryDecodeSMLAL_ASIMDDIFF_L(data, inst);
++}
++
++// UMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- unsigned multiply-subtract.
++bool TryDecodeUMLSL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  return TryDecodeSMLAL_ASIMDDIFF_L(data, inst);
++}
++
++// SMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- signed multiply-subtract.
++bool TryDecodeSMLSL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  return TryDecodeSMLAL_ASIMDDIFF_L(data, inst);
++}
++
+ // SSUBW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
+ bool TryDecodeSSUBW_ASIMDDIFF_W(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index dc75f19..b10f445 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -5382,9 +5382,7 @@ bool TryDecodeSSUBL_ASIMDDIFF_L(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeSMLSL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSMLSL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // STTRB STTRB_32_ldst_unpriv:
+ //   0 x Rt       0
+@@ -15169,9 +15167,7 @@ bool TryDecodeSCVTF_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeUMULL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUMULL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // FMUL FMUL_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -26366,9 +26362,7 @@ bool TryDecodeTRN1_ASIMDPERM_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeSMULL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSMULL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // URSQRTE URSQRTE_asimdmisc_R:
+ //   0 x Rd       0
+@@ -33591,9 +33585,7 @@ bool TryDecodeNEG_ASIMDMISC_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeUMLAL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUMLAL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // PMULL PMULL_asimddiff_L:
+ //   0 x Rd       0
+@@ -34794,9 +34786,7 @@ bool TryDecodeFMINNM_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeUMLSL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUMLSL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // STSMAXB STSMAXB_32S_memop:
+ //   0 1 Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index 0d69f81..9693376 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -2263,6 +2263,123 @@ DEF_ISEL(SMLAL_ASIMDDIFF_L_8H16B) = SMLAL2_8<VIi16v8, VIi8v16>;
+ DEF_ISEL(SMLAL_ASIMDDIFF_L_4S8H) = SMLAL2_16<VIi32v4, VIi16v8>;
+ DEF_ISEL(SMLAL_ASIMDDIFF_L_2D4S) = SMLAL2_32<VIi64v2, VIi32v4>;
+ 
++// The rest of the ASIMDDIFF widening-multiply family: {S,U}MULL{2},
++// UMLAL{2}, {S,U}MLSL{2}. Same widening shape as SMLAL -- narrow sources,
++// destination twice the element width, the `2` form reading the high half --
++// differing only in signedness and in what is done with the product.
++//
++// The product is computed in the WIDE type, so the widening conversion happens
++// before the multiply. Doing it the other way truncates: 0xffff * 0xffff is
++// 0xfffe0001, which is exactly the value a 4H*4H->4S umull must produce and
++// exactly the value a 16-bit multiply cannot hold.
++namespace {
++
++// MULL: dst = widen(n) * widen(m). Write-only destination.
++#define MAKE_MULL(name, rd, ty, s_esize, d_esize) \
++  template <typename D, typename S> \
++  DEF_SEM_T(name##_##s_esize, S srcn, S srcm) { \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] = ty##d_esize##_t(srcn_v[i]) * ty##d_esize##_t(srcm_v[i]); \
++    } \
++    return res; \
++  } \
++  template <typename D, typename S> \
++  DEF_SEM_T(name##2_##s_esize, S srcn, S srcm) { \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    D res{}; \
++    auto res_len = GetVectorElemsNum(res); \
++    _Pragma("unroll") for (size_t i = 0; i < res_len; i++) { \
++      res[i] = ty##d_esize##_t(srcn_v[i + res_len]) * ty##d_esize##_t(srcm_v[i + res_len]); \
++    } \
++    return res; \
++  }
++
++// MLAL/MLSL: dst op= widen(n) * widen(m). Read-write destination, matching the
++// kActionReadWrite operand the decoder adds.
++#define MAKE_MLXL(name, rd, ty, op, s_esize, d_esize) \
++  template <typename D, typename S> \
++  DEF_SEM_T(name##_##s_esize, D dst, S srcn, S srcm) { \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    D res = rd##ReadVI##d_esize(dst); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] op ty##d_esize##_t(srcn_v[i]) * ty##d_esize##_t(srcm_v[i]); \
++    } \
++    return res; \
++  } \
++  template <typename D, typename S> \
++  DEF_SEM_T(name##2_##s_esize, D dst, S srcn, S srcm) { \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    D res = rd##ReadVI##d_esize(dst); \
++    auto res_len = GetVectorElemsNum(res); \
++    _Pragma("unroll") for (size_t i = 0; i < res_len; i++) { \
++      res[i] op ty##d_esize##_t(srcn_v[i + res_len]) * ty##d_esize##_t(srcm_v[i + res_len]); \
++    } \
++    return res; \
++  }
++
++MAKE_MULL(UMULL, U, uint, 8, 16);
++MAKE_MULL(UMULL, U, uint, 16, 32);
++MAKE_MULL(UMULL, U, uint, 32, 64);
++MAKE_MULL(SMULL, S, int, 8, 16);
++MAKE_MULL(SMULL, S, int, 16, 32);
++MAKE_MULL(SMULL, S, int, 32, 64);
++
++MAKE_MLXL(UMLAL, U, uint, +=, 8, 16);
++MAKE_MLXL(UMLAL, U, uint, +=, 16, 32);
++MAKE_MLXL(UMLAL, U, uint, +=, 32, 64);
++MAKE_MLXL(UMLSL, U, uint, -=, 8, 16);
++MAKE_MLXL(UMLSL, U, uint, -=, 16, 32);
++MAKE_MLXL(UMLSL, U, uint, -=, 32, 64);
++MAKE_MLXL(SMLSL, S, int, -=, 8, 16);
++MAKE_MLXL(SMLSL, S, int, -=, 16, 32);
++MAKE_MLXL(SMLSL, S, int, -=, 32, 64);
++
++#undef MAKE_MULL
++#undef MAKE_MLXL
++
++}  // namespace
++
++DEF_ISEL(UMULL_ASIMDDIFF_L_8H8B) = UMULL_8<VIu16v8, VIu8v8>;
++DEF_ISEL(UMULL_ASIMDDIFF_L_4S4H) = UMULL_16<VIu32v4, VIu16v4>;
++DEF_ISEL(UMULL_ASIMDDIFF_L_2D2S) = UMULL_32<VIu64v2, VIu32v2>;
++DEF_ISEL(UMULL_ASIMDDIFF_L_8H16B) = UMULL2_8<VIu16v8, VIu8v16>;
++DEF_ISEL(UMULL_ASIMDDIFF_L_4S8H) = UMULL2_16<VIu32v4, VIu16v8>;
++DEF_ISEL(UMULL_ASIMDDIFF_L_2D4S) = UMULL2_32<VIu64v2, VIu32v4>;
++
++DEF_ISEL(SMULL_ASIMDDIFF_L_8H8B) = SMULL_8<VIi16v8, VIi8v8>;
++DEF_ISEL(SMULL_ASIMDDIFF_L_4S4H) = SMULL_16<VIi32v4, VIi16v4>;
++DEF_ISEL(SMULL_ASIMDDIFF_L_2D2S) = SMULL_32<VIi64v2, VIi32v2>;
++DEF_ISEL(SMULL_ASIMDDIFF_L_8H16B) = SMULL2_8<VIi16v8, VIi8v16>;
++DEF_ISEL(SMULL_ASIMDDIFF_L_4S8H) = SMULL2_16<VIi32v4, VIi16v8>;
++DEF_ISEL(SMULL_ASIMDDIFF_L_2D4S) = SMULL2_32<VIi64v2, VIi32v4>;
++
++DEF_ISEL(UMLAL_ASIMDDIFF_L_8H8B) = UMLAL_8<VIu16v8, VIu8v8>;
++DEF_ISEL(UMLAL_ASIMDDIFF_L_4S4H) = UMLAL_16<VIu32v4, VIu16v4>;
++DEF_ISEL(UMLAL_ASIMDDIFF_L_2D2S) = UMLAL_32<VIu64v2, VIu32v2>;
++DEF_ISEL(UMLAL_ASIMDDIFF_L_8H16B) = UMLAL2_8<VIu16v8, VIu8v16>;
++DEF_ISEL(UMLAL_ASIMDDIFF_L_4S8H) = UMLAL2_16<VIu32v4, VIu16v8>;
++DEF_ISEL(UMLAL_ASIMDDIFF_L_2D4S) = UMLAL2_32<VIu64v2, VIu32v4>;
++
++DEF_ISEL(UMLSL_ASIMDDIFF_L_8H8B) = UMLSL_8<VIu16v8, VIu8v8>;
++DEF_ISEL(UMLSL_ASIMDDIFF_L_4S4H) = UMLSL_16<VIu32v4, VIu16v4>;
++DEF_ISEL(UMLSL_ASIMDDIFF_L_2D2S) = UMLSL_32<VIu64v2, VIu32v2>;
++DEF_ISEL(UMLSL_ASIMDDIFF_L_8H16B) = UMLSL2_8<VIu16v8, VIu8v16>;
++DEF_ISEL(UMLSL_ASIMDDIFF_L_4S8H) = UMLSL2_16<VIu32v4, VIu16v8>;
++DEF_ISEL(UMLSL_ASIMDDIFF_L_2D4S) = UMLSL2_32<VIu64v2, VIu32v4>;
++
++DEF_ISEL(SMLSL_ASIMDDIFF_L_8H8B) = SMLSL_8<VIi16v8, VIi8v8>;
++DEF_ISEL(SMLSL_ASIMDDIFF_L_4S4H) = SMLSL_16<VIi32v4, VIi16v4>;
++DEF_ISEL(SMLSL_ASIMDDIFF_L_2D2S) = SMLSL_32<VIi64v2, VIi32v2>;
++DEF_ISEL(SMLSL_ASIMDDIFF_L_8H16B) = SMLSL2_8<VIi16v8, VIi8v16>;
++DEF_ISEL(SMLSL_ASIMDDIFF_L_4S8H) = SMLSL2_16<VIi32v4, VIi16v8>;
++DEF_ISEL(SMLSL_ASIMDDIFF_L_2D4S) = SMLSL2_32<VIi64v2, VIi32v4>;
++
+ // SSUBW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
+ namespace {
+ #define MAKE_SSUBW(ta_esize, tb_esize) \

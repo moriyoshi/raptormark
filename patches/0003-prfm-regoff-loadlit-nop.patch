@@ -1,0 +1,46 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..68c57da 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -17212,8 +17212,13 @@ bool TryDecodeFMULX_ASIMDELEM_R_SD(const InstData &, Instruction &) {
+ //  30 1 size     0
+ //  31 1 size     1
+ // PRFM  (<prfop>|#<imm5>), [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
+-bool TryDecodePRFM_P_LDST_REGOFF(const InstData &, Instruction &) {
+-  return false;
++bool TryDecodePRFM_P_LDST_REGOFF(const InstData &, Instruction &inst) {
++  // PRFM is a pure cache hint with no architectural effect: decode as a NOP,
++  // mirroring TryDecodePRFM_P_LDST_POS (Arch.cpp). Leaving it undecoded makes
++  // the instruction unlifted, so reaching it traps with
++  // "no lifted instruction at 0x... was executed".
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  return true;
+ }
+ 
+ // STUMINH STUMINH_32S_memop:
+@@ -24884,8 +24889,10 @@ bool TryDecodeLD3R_ASISDLSOP_RX3_R(const InstData &, Instruction &) {
+ //  30 1 opc      0
+ //  31 1 opc      1
+ // PRFM  (<prfop>|#<imm5>), <label>
+-bool TryDecodePRFM_P_LOADLIT(const InstData &, Instruction &) {
+-  return false;
++bool TryDecodePRFM_P_LOADLIT(const InstData &, Instruction &inst) {
++  // Pure cache hint; see TryDecodePRFM_P_LDST_REGOFF.
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  return true;
+ }
+ 
+ // CASAB CASAB_C32_ldstexcl:
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/MISC.cpp b/backend/remill/lib/Arch/AArch64/Semantics/MISC.cpp
+index e4671ab..cb9301b 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/MISC.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/MISC.cpp
+@@ -31,6 +31,8 @@ DEF_ISEL(HINT_3) = DoNOP;  // HINT  #<imm>
+ DEF_ISEL(NOP_HI_SYSTEM) = DoNOP;  // NOP
+ 
+ DEF_ISEL(PRFM_P_LDST_POS) = DoNOP;  // PRFM  (<prfop>|#<imm5>), [<Xn|SP>{, #<pimm>}]
++DEF_ISEL(PRFM_P_LDST_REGOFF) = DoNOP;  // PRFM  (<prfop>|#<imm5>), [<Xn|SP>, (<Wm>|<Xm>){, <extend> {<amount>}}]
++DEF_ISEL(PRFM_P_LOADLIT) = DoNOP;  // PRFM  (<prfop>|#<imm5>), <label>
+ 
+ namespace {
+ 

@@ -1,0 +1,47 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -63,6 +63,9 @@
+ // the machinery around them; these account for the per-trace passes that walk
+ // every block, and for the per-block bookkeeping the disabled VRO path consumes.
+ static uint64_t ecv_indirect_ns = 0, ecv_fork_ns = 0;
++// The instruction work-list loop in full: splits the unaccounted ~95% into
++// per-instruction machinery (inside) and per-trace machinery (outside).
++static uint64_t ecv_instloop_ns = 0;
+ static uint64_t ecv_bbreg_ns = 0, ecv_bbreg_count = 0;
+ static uint64_t ecv_vropt_ns = 0, ecv_vropt_count = 0;
+ 
+@@ -93,10 +96,11 @@
+     if (getenv("ECV_DECODE_STATS")) {
+       fprintf(stderr,
+               "[ecv] insns %llu  decode %.3fs  emit %.3fs  indirectbr %.3fs  fork %.3fs  "
+-              "bbreg %llu/%.3fs  vropt %llu/%.3fs\n",
++              "bbreg %llu/%.3fs  vropt %llu/%.3fs  instloop %.3fs\n",
+               (unsigned long long) ecv_insn_count, ecv_decode_ns / 1e9, ecv_emit_ns / 1e9,
+               ecv_indirect_ns / 1e9, ecv_fork_ns / 1e9, (unsigned long long) ecv_bbreg_count,
+-              ecv_bbreg_ns / 1e9, (unsigned long long) ecv_vropt_count, ecv_vropt_ns / 1e9);
++              ecv_bbreg_ns / 1e9, (unsigned long long) ecv_vropt_count, ecv_vropt_ns / 1e9,
++              ecv_instloop_ns / 1e9);
+       fflush(stderr);
+     }
+   }
+@@ -485,6 +489,8 @@
+ 
+   // Decode instructions.
+   inst_lifting_start:
++    {
++    auto ecv_l0 = std::chrono::steady_clock::now();
+     while (!inst_work_list.empty()) {
+       const auto inst_addr = PopInstructionAddress();
+ 
+@@ -1029,6 +1035,10 @@
+         }
+       }
+     }
++    ecv_instloop_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                           std::chrono::steady_clock::now() - ecv_l0)
++                           .count();
++  }
+ 
+     // Seed the block work-list with every BTI *jump* landing pad in this function
+     // that direct-branch discovery missed. A jump table / computed goto (a C

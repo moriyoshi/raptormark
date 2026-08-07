@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pipeline",
+    srcs = [
+        "build.go",
+        "run.go",
+    ],
+    importpath = "raptormark/internal/pipeline",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/fuse",
+        "//internal/image",
+        "//internal/link",
+        "//internal/rootfs",
+        "//internal/translate",
+    ],
+)
+
+# Runs under `bazel test //...`, unlike //internal/rootfs and //internal/builder:
+# these tests read nothing outside the sandbox and shell out to nothing. They
+# cover the refusal to default the builder image and the two path derivations,
+# all of which are pure functions of their arguments.
+go_test(
+    name = "pipeline_test",
+    srcs = [
+        "build_test.go",
+        "run_test.go",
+    ],
+    embed = [":pipeline"],
+)

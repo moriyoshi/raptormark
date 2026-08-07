@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "oci",
+    srcs = [
+        "blob.go",
+        "cmd.go",
+        "imports.go",
+        "oci.go",
+    ],
+    importpath = "raptormark/internal/oci",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/image",
+        "//internal/rootfs",
+    ],
+)
+
+go_test(
+    name = "oci_test",
+    srcs = [
+        "imports_test.go",
+        "oci_test.go",
+    ],
+    embed = [":oci"],
+    deps = ["//internal/rootfs"],
+)

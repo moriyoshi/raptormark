@@ -1,0 +1,56 @@
+raptormark: name lifted functions by address alone, not discovery order.
+
+GetUniqueLiftedFuncName appended a monotonic counter immediately in front of the
+guest address that already identifies the function:
+
+    <sym>_____<unique_i64++>_<vma>
+
+The counter follows discovery order over the whole binary, so a program with a
+differently-sized executable shifts the index of every library function after it.
+Measured on two programs fused from one rootfs with a shared library layout,
+1,527 functions sat at IDENTICAL guest addresses and 0 of 1,527 received the same
+name -- the counter alone forced them apart.
+
+That defeats cross-program reuse. A library's lifted code is identical between
+programs once its address is fixed (internal/fuse closure layout), and identical
+code should get an identical name so the partition cache can serve it once and so
+the linker can collapse the duplicate definitions.
+
+Dropping the counter is safe because disasm_funcs is keyed by address: there is
+exactly one lifted function per guest address, so <sym>_<vma> is already unique
+within a module. The address was already present in the name; the counter added
+instability and nothing else.
+
+unique_i64 is removed rather than left unused, since it is a private member and
+-Wunused-private-field would fire.
+--- a/lifter/TraceManager.h
++++ b/lifter/TraceManager.h
+@@ -38,8 +38,7 @@
+  public:
+   virtual ~AArch64TraceManager(void) = default;
+   AArch64TraceManager(std::string target_elf_file_name)
+-      : elf_obj(BinaryLoader::ELFObject(target_elf_file_name)),
+-        unique_i64(0) {}
++      : elf_obj(BinaryLoader::ELFObject(target_elf_file_name)) {}
+ 
+   void SetLiftedTraceDefinition(uint64_t addr, llvm::Function *lifted_func);
+   std::string AddRestDisasmFunc(uint64_t addr);
+@@ -84,6 +83,4 @@
+   uintptr_t entry_point;
+   std::string target_arch;
+ 
+- private:
+-  uint64_t unique_i64;
+ };
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -155,8 +155,7 @@
+ 
+ std::string AArch64TraceManager::GetUniqueLiftedFuncName(std::string func_name, uint64_t vma_s) {
+   std::stringstream lifted_fn_name;
+-  lifted_fn_name << func_name << "_____" << std::to_string(unique_i64++) << "_" << std::hex
+-                 << vma_s;
++  lifted_fn_name << func_name << "_____" << std::hex << vma_s;
+   return lifted_fn_name.str();
+ }
+ 

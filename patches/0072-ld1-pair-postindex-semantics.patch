@@ -1,0 +1,152 @@
+LD1 { Vt, Vt2 }, [Xn], #imm -- restore the pair post-index semantics.
+
+`LD1_ASISDLSEP_I2_I2_*` had no live `DEF_ISEL`. The DECODER for it is fine and
+symmetric with the store side (`TryDecodeLD1_ASISDLSEP_I2_I2` calls
+`AddPostIndexMemOp` exactly as `TryDecodeST1_ASISDLSEP_I2_I2` does), so the
+instruction decoded and then lifted to NOTHING.
+
+❗ A missing DEF_ISEL here is SILENT, not fatal. `_ecv_unreached` fires only when
+the decoder itself refuses; a decoded instruction with no semantics is simply a
+no-op that neither loads its vectors nor advances its base register. Measured
+2026-09-01 with `.agents-workspace/govm/ld1chk.c`: both destination vectors stay
+zero and the base register does not move.
+
+What that cost: Go's `internal/bytealg.indexbytebody` computes its return value
+FROM the advanced pointer --
+
+    121d4: ld1 {v1.16b-v2.16b}, [x3], #32
+    12230: sub x3, x3, #0x20
+    1223c: sub x0, x0, x11          ; index = advanced - original
+
+-- so with the load a no-op every `IndexByte` returned a negative index. glibc's
+`gostringnocopy`/`findnull` path then built a Go string of length -32 and
+`runtime.printFuncName` looped forever, which is why `postgres:17` hung after
+`exec gosu` rather than printing a traceback.
+
+The writeback is NOT performed by the semantics. `AddPostIndexMemOp` carries it
+on the memory operand, which is why `ST1_PAIR_POSTINDEX` simply delegates to
+`ST1_PAIR`; this mirrors that exactly.
+
+⚠️ The dead code that was there could NOT be uncommented. It was written against
+the older `DEF_SEM(..., R64 addr_reg, ADDR next_addr)` signature and did its own
+`Write(addr_reg, Read(next_addr))`, which under the current convention would
+update the base register a SECOND time.
+
+⚠️ Both arms of the `#if defined(__x86_64__)` split are covered; the two branches
+name their pair helpers differently (`LD1_PAIR_8_128` vs `LD1_PAIR_8`), so the
+ISELs cannot be shared.
+
+Still missing after this patch, and deliberately out of scope: the 3- and
+4-register LD1 forms (they need `TTriple`/`TQuad` return types that do not
+exist), and five ST1 forms that have no `TryDecode*` at all and therefore fail
+LOUDLY rather than silently. See `.agents/docs/TODO.md`.
+
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1068,6 +1068,55 @@
+ DEF_ISEL(LD1_ASISDLSE_R2_2V_1D) = LD1_PAIR_64_64<MVI64>;  // LD1  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
+ DEF_ISEL(LD1_ASISDLSE_R2_2V_2D) =
+     LD1_PAIR_64_128<MVI128>;  // LD1  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
++
++// LD1 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm> -- POST-INDEX.
++//
++// The base-register update is NOT done here: `TryDecodeLD1_ASISDLSEP_I2_I2`
++// calls `AddPostIndexMemOp`, and the writeback rides on that memory operand.
++// So the semantic is the plain pair load, exactly as `ST1_PAIR_POSTINDEX`
++// delegates to `ST1_PAIR` on the store side.
++//
++// These were present but COMMENTED OUT, written against the older
++// `DEF_SEM(..., R64 addr_reg, ADDR next_addr)` signature with an explicit
++// `Write(addr_reg, ...)`. Restoring that shape would have written the base
++// register twice.
++//
++// Symptom this fixes: a commented-out DEF_ISEL leaves the instruction a silent
++// NO-OP -- it neither loads nor advances. Go's `internal/bytealg.indexbytebody`
++// computes its result from the advanced pointer, so every `IndexByte` returned
++// a negative index and `runtime.printFuncName` looped forever on a string of
++// length -32. See .agents/docs/JOURNAL.md, 2026-09-01.
++
++namespace {
++
++#  define MAKE_LD1_PAIR_POSTINDEX(elem_size, whole_size) \
++    template <typename S> \
++    DEF_SEM_T_RUN(LD1_PAIR_POSTINDEX_##elem_size##_##whole_size, S src) { \
++      return LD1_PAIR_##elem_size##_##whole_size(arena_ptr, rt_m, src); \
++    }
++
++MAKE_LD1_PAIR_POSTINDEX(8, 64)
++MAKE_LD1_PAIR_POSTINDEX(16, 64)
++MAKE_LD1_PAIR_POSTINDEX(32, 64)
++MAKE_LD1_PAIR_POSTINDEX(64, 64)
++
++MAKE_LD1_PAIR_POSTINDEX(8, 128)
++MAKE_LD1_PAIR_POSTINDEX(16, 128)
++MAKE_LD1_PAIR_POSTINDEX(32, 128)
++MAKE_LD1_PAIR_POSTINDEX(64, 128)
++
++#  undef MAKE_LD1_PAIR_POSTINDEX
++
++}  // namespace
++
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_8B) = LD1_PAIR_POSTINDEX_8_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_16B) = LD1_PAIR_POSTINDEX_8_128<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_4H) = LD1_PAIR_POSTINDEX_16_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_8H) = LD1_PAIR_POSTINDEX_16_128<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_2S) = LD1_PAIR_POSTINDEX_32_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_4S) = LD1_PAIR_POSTINDEX_32_128<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_1D) = LD1_PAIR_POSTINDEX_64_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_2D) = LD1_PAIR_POSTINDEX_64_128<MVI128>;
+ #else
+ 
+ namespace {
+@@ -1101,6 +1150,50 @@
+ DEF_ISEL(LD1_ASISDLSE_R2_2V_1D) = LD1_PAIR_64<MVI64>;  // LD1  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
+ DEF_ISEL(LD1_ASISDLSE_R2_2V_2D) = LD1_PAIR_64<MVI128>;  // LD1  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
+ 
++// LD1 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm> -- POST-INDEX.
++//
++// The base-register update is NOT done here: `TryDecodeLD1_ASISDLSEP_I2_I2`
++// calls `AddPostIndexMemOp`, and the writeback rides on that memory operand.
++// So the semantic is the plain pair load, exactly as `ST1_PAIR_POSTINDEX`
++// delegates to `ST1_PAIR` on the store side.
++//
++// These were present but COMMENTED OUT, written against the older
++// `DEF_SEM(..., R64 addr_reg, ADDR next_addr)` signature with an explicit
++// `Write(addr_reg, ...)`. Restoring that shape would have written the base
++// register twice.
++//
++// Symptom this fixes: a commented-out DEF_ISEL leaves the instruction a silent
++// NO-OP -- it neither loads nor advances. Go's `internal/bytealg.indexbytebody`
++// computes its result from the advanced pointer, so every `IndexByte` returned
++// a negative index and `runtime.printFuncName` looped forever on a string of
++// length -32. See .agents/docs/JOURNAL.md, 2026-09-01.
++
++namespace {
++
++#  define MAKE_LD1_PAIR_POSTINDEX(elem_size) \
++    template <typename S> \
++    DEF_SEM_T_RUN(LD1_PAIR_POSTINDEX_##elem_size, S src) { \
++      return LD1_PAIR_##elem_size(arena_ptr, rt_m, src); \
++    }
++
++MAKE_LD1_PAIR_POSTINDEX(8)
++MAKE_LD1_PAIR_POSTINDEX(16)
++MAKE_LD1_PAIR_POSTINDEX(32)
++MAKE_LD1_PAIR_POSTINDEX(64)
++
++#  undef MAKE_LD1_PAIR_POSTINDEX
++
++}  // namespace
++
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_8B) = LD1_PAIR_POSTINDEX_8<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_16B) = LD1_PAIR_POSTINDEX_8<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_4H) = LD1_PAIR_POSTINDEX_16<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_8H) = LD1_PAIR_POSTINDEX_16<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_2S) = LD1_PAIR_POSTINDEX_32<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_4S) = LD1_PAIR_POSTINDEX_32<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_1D) = LD1_PAIR_POSTINDEX_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I2_I2_2D) = LD1_PAIR_POSTINDEX_64<MVI128>;
++
+ #endif
+ 
+ namespace {

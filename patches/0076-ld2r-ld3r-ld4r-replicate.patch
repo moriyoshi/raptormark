@@ -1,0 +1,223 @@
+LD2R/LD3R/LD4R -- load one element per register and REPLICATE it.
+
+A different family from the multiple-structures forms 0072-0074 restored: those
+distribute one contiguous block across N registers, while LD<n>R reads N
+consecutive elements and splats each across its own destination.
+
+All three had `return false` STUBS in Decode.cpp and no semantics, so they were
+fatal `undecoded instruction` -- the loud failure mode, not the silent one.
+Only `LD1R_ASISDLSO_R1` was ever implemented.
+
+Where it bites: Go reaches LD4R during runtime start-up, in
+`internal/chacha8rand.block` (the runtime PRNG):
+
+    1ef44: 4d60e940  ld4r {v0.4s-v3.4s}, [x10]
+
+Measured 2026-09-01: with 0075 applied a Go 1.26 hello-world LIFTS but stops
+here at run time. ⚠️ `gosu` (Go 1.24) also contains four `ld[1234]r` and is
+unaffected only because it dies in `mallocinit` before reaching them -- so this
+is not a Go-version difference either, just a difference in how far each binary
+gets.
+
+The decoder mirrors `TryDecodeLD1R_ASISDLSO_R1` with N destinations, wrapping
+the register number at 32 as `TryDecodeLDn` does. ❗ The memory operand keeps the
+SINGLE-element size, exactly as LD1R's does: the semantics walks to the 2nd..Nth
+elements with `GetElementPtr`, so the operand must stay the one-element type
+(`M32` for `.4s`) or it would not match the semantic's parameter.
+
+The multi-value returns reuse `TPair` and the `TTriple`/`TQuad` added in 0073.
+No framework support is needed -- the lifter writes an N-element struct return
+across N destination registers generically.
+
+Not covered: the post-index replicate forms (`*_ASISDLSOP_R*_I` and
+`*_ASISDLSOP_RX*_R`). They keep their stubs and so still fail loudly, and
+nothing measured in any fixture executes one.
+
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -24613,9 +24613,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD3R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>]
+-bool TryDecodeLD3R_ASISDLSO_R3(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD3R_ASISDLSO_R3 is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD3R LD3R_asisdlsop_R3_i:
+ //   0 x Rt       0
+@@ -32552,9 +32551,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD2R  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
+-bool TryDecodeLD2R_ASISDLSO_R2(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD2R_ASISDLSO_R2 is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD2R LD2R_asisdlsop_R2_i:
+ //   0 x Rt       0
+@@ -35323,9 +35321,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD4R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>]
+-bool TryDecodeLD4R_ASISDLSO_R4(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD4R_ASISDLSO_R4 is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD4R LD4R_asisdlsop_R4_i:
+ //   0 x Rt       0
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7392,6 +7392,44 @@
+   return true;
+ }
+ 
++// LD2R/LD3R/LD4R { <Vt>.<T>, ... }, [<Xn|SP>]
++//
++// Same shape as LD1R above, with N consecutive destination registers. The
++// memory operand keeps the SINGLE-element size, as LD1R's does: the semantics
++// walks to the 2nd..Nth elements with `GetElementPtr`, so the operand type must
++// stay the one-element type (`M32` for `.4s`, etc.) or it would not match.
++//
++// Destination numbering wraps at 32, the same rule `TryDecodeLDn` applies to
++// the multiple-structures forms.
++static bool TryDecodeLDnR(const InstData &data, Instruction &inst, uint8_t num_regs) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  auto elem_size = 8UL << data.size;
++  auto total_size = data.Q ? 128 : 64;
++  auto t = static_cast<uint8_t>(data.Rt);
++  for (uint8_t i = 0; i < num_regs; ++i) {
++    AddRegOperand(inst, kActionWrite, ArrangementRegClass(total_size, elem_size), kUseAsValue,
++                  static_cast<aarch64::RegNum>((t + i) % 32));
++  }
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  AddBasePlusOffsetMemOp(inst, elem_size, data.Rn, 0);
++  return true;
++}
++
++// LD2R  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
++bool TryDecodeLD2R_ASISDLSO_R2(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR(data, inst, 2);
++}
++
++// LD3R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>]
++bool TryDecodeLD3R_ASISDLSO_R3(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR(data, inst, 3);
++}
++
++// LD4R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>]
++bool TryDecodeLD4R_ASISDLSO_R4(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR(data, inst, 4);
++}
++
+ // LD4  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
+ bool TryDecodeLD4_ASISDLSEP_I4_I(const InstData &, Instruction &) {
+   return false;
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -2072,6 +2072,100 @@
+ DEF_ISEL(LD1R_ASISDLSO_R1_1D) = LD1R_64<VIu64v1, M64>;  // LD1R  { <Vt>.<T> }, [<Xn|SP>]
+ DEF_ISEL(LD1R_ASISDLSO_R1_2D) = LD1R_64<VIu64v2, M64>;  // LD1R  { <Vt>.<T> }, [<Xn|SP>]
+ 
++// LD2R / LD3R / LD4R  { <Vt>.<T>, ... }, [<Xn|SP>]
++//
++// Load N consecutive elements and REPLICATE each across its own destination
++// register -- a different family from the multiple-structures LD1/ST1 forms
++// (0072-0074), which distribute one contiguous block across the registers.
++//
++// These had `return false` stubs in Decode.cpp and no semantics, so they were
++// fatal `undecoded instruction`. Go reaches `LD4R` in
++// `internal/chacha8rand.block` during runtime start-up:
++//
++//   1ef44: 4d60e940  ld4r {v0.4s-v3.4s}, [x10]
++//
++// The multi-value return reuses the `TTriple`/`TQuad` types added in 0073; the
++// lifter writes an N-element struct return across N destination registers with
++// no special-casing.
++namespace {
++
++#define MAKE_LDNR(elem_size) \
++  template <typename V, typename MT> \
++  DEF_SEM_T_RUN(LD2R_##elem_size, MT mem) { \
++    auto m0 = ReadMem(rt_m, arena_ptr, mem); \
++    auto m1 = ReadMem(rt_m, arena_ptr, GetElementPtr(mem, 1U)); \
++    V r0 = {}, r1 = {}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(r0); i++) { \
++      r0[i] = m0; \
++      r1[i] = m1; \
++    } \
++    return TPair<V>{r0, r1}; \
++  } \
++  template <typename V, typename MT> \
++  DEF_SEM_T_RUN(LD3R_##elem_size, MT mem) { \
++    auto m0 = ReadMem(rt_m, arena_ptr, mem); \
++    auto m1 = ReadMem(rt_m, arena_ptr, GetElementPtr(mem, 1U)); \
++    auto m2 = ReadMem(rt_m, arena_ptr, GetElementPtr(mem, 2U)); \
++    V r0 = {}, r1 = {}, r2 = {}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(r0); i++) { \
++      r0[i] = m0; \
++      r1[i] = m1; \
++      r2[i] = m2; \
++    } \
++    return TTriple<V>{r0, r1, r2}; \
++  } \
++  template <typename V, typename MT> \
++  DEF_SEM_T_RUN(LD4R_##elem_size, MT mem) { \
++    auto m0 = ReadMem(rt_m, arena_ptr, mem); \
++    auto m1 = ReadMem(rt_m, arena_ptr, GetElementPtr(mem, 1U)); \
++    auto m2 = ReadMem(rt_m, arena_ptr, GetElementPtr(mem, 2U)); \
++    auto m3 = ReadMem(rt_m, arena_ptr, GetElementPtr(mem, 3U)); \
++    V r0 = {}, r1 = {}, r2 = {}, r3 = {}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(r0); i++) { \
++      r0[i] = m0; \
++      r1[i] = m1; \
++      r2[i] = m2; \
++      r3[i] = m3; \
++    } \
++    return TQuad<V>{r0, r1, r2, r3}; \
++  }
++
++MAKE_LDNR(8)
++MAKE_LDNR(16)
++MAKE_LDNR(32)
++MAKE_LDNR(64)
++
++#undef MAKE_LDNR
++
++}  // namespace
++
++DEF_ISEL(LD2R_ASISDLSO_R2_8B) = LD2R_8<VIu8v8, M8>;
++DEF_ISEL(LD2R_ASISDLSO_R2_16B) = LD2R_8<VIu8v16, M8>;
++DEF_ISEL(LD2R_ASISDLSO_R2_4H) = LD2R_16<VIu16v4, M16>;
++DEF_ISEL(LD2R_ASISDLSO_R2_8H) = LD2R_16<VIu16v8, M16>;
++DEF_ISEL(LD2R_ASISDLSO_R2_2S) = LD2R_32<VIu32v2, M32>;
++DEF_ISEL(LD2R_ASISDLSO_R2_4S) = LD2R_32<VIu32v4, M32>;
++DEF_ISEL(LD2R_ASISDLSO_R2_1D) = LD2R_64<VIu64v1, M64>;
++DEF_ISEL(LD2R_ASISDLSO_R2_2D) = LD2R_64<VIu64v2, M64>;
++
++DEF_ISEL(LD3R_ASISDLSO_R3_8B) = LD3R_8<VIu8v8, M8>;
++DEF_ISEL(LD3R_ASISDLSO_R3_16B) = LD3R_8<VIu8v16, M8>;
++DEF_ISEL(LD3R_ASISDLSO_R3_4H) = LD3R_16<VIu16v4, M16>;
++DEF_ISEL(LD3R_ASISDLSO_R3_8H) = LD3R_16<VIu16v8, M16>;
++DEF_ISEL(LD3R_ASISDLSO_R3_2S) = LD3R_32<VIu32v2, M32>;
++DEF_ISEL(LD3R_ASISDLSO_R3_4S) = LD3R_32<VIu32v4, M32>;
++DEF_ISEL(LD3R_ASISDLSO_R3_1D) = LD3R_64<VIu64v1, M64>;
++DEF_ISEL(LD3R_ASISDLSO_R3_2D) = LD3R_64<VIu64v2, M64>;
++
++DEF_ISEL(LD4R_ASISDLSO_R4_8B) = LD4R_8<VIu8v8, M8>;
++DEF_ISEL(LD4R_ASISDLSO_R4_16B) = LD4R_8<VIu8v16, M8>;
++DEF_ISEL(LD4R_ASISDLSO_R4_4H) = LD4R_16<VIu16v4, M16>;
++DEF_ISEL(LD4R_ASISDLSO_R4_8H) = LD4R_16<VIu16v8, M16>;
++DEF_ISEL(LD4R_ASISDLSO_R4_2S) = LD4R_32<VIu32v2, M32>;
++DEF_ISEL(LD4R_ASISDLSO_R4_4S) = LD4R_32<VIu32v4, M32>;
++DEF_ISEL(LD4R_ASISDLSO_R4_1D) = LD4R_64<VIu64v1, M64>;
++DEF_ISEL(LD4R_ASISDLSO_R4_2D) = LD4R_64<VIu64v2, M64>;
++
+ // MOV  <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]
+ namespace {
+ 

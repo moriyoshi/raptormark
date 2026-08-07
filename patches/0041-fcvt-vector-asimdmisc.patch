@@ -1,0 +1,412 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..c3db563 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5952,6 +5952,75 @@ bool TryDecodeSCVTF_ASIMDMISC_R(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// FCVT{Z,N,P,M,A}{S,U}  <Vd>.<T>, <Vn>.<T> -- the VECTOR (ASIMD two-register
++// misc) float-to-integer conversions. Patch 0028 covered the scalar family
++// only; `fcvtzs v30.2s, v30.2s` inside libicuuc stopped initdb's post-bootstrap
++// phase, and the whole postgres closure holds only a handful of these, all
++// first reached once ICU executes -- so the family goes in together rather than
++// one 70-minute re-lift at a time.
++//
++// Operands are exactly SCVTF_ASIMDMISC_R's: one arrangement, the same register
++// class for source and destination (a 2S float vector converts to a 2S integer
++// vector). Only the ELEMENT interpretation differs, and that lives in the
++// semantics. The `sz && !Q` rejection is the 1D arrangement, which is
++// unallocated -- 64-bit elements require Q=1.
++static bool TryDecodeFCVT_ASIMDMISC(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (data.sz && !data.Q) {
++    return false;
++  }
++  const uint64_t total_size = data.Q ? 128 : 64;
++  const uint64_t elem_size = data.sz ? 64 : 32;
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  auto rclass = ArrangementRegClass(total_size, elem_size);
++  AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  if (inst.lift_config.float_exception_enabled) {
++    AddArrangementSpecifierFPSRStatus(inst);
++  }
++  return true;
++}
++
++bool TryDecodeFCVTZS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTZU_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTNS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTNU_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTPS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTPU_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTMS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTMU_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTAS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFCVTAU_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFCVT_ASIMDMISC(data, inst);
++}
++
+ // BIC  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ bool TryDecodeBIC_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..bcb970c 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -8456,9 +8456,7 @@ bool TryDecodeFCVTAU_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTAU  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTAU_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAU_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // BFM BFXIL_BFM_32M_bitfield:
+ //   0 x Rd       0
+@@ -9851,9 +9849,7 @@ bool TryDecodeFCVTZU_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTZU  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTZU_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTZU_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // ORN MVN_ORN_32_log_shift:
+ //   0 x Rd       0
+@@ -15730,9 +15726,7 @@ bool TryDecodeFCVTNU_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTNU  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTNU_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNU_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // STUMINB STUMINB_32S_memop:
+ //   0 1 Rt       0
+@@ -16034,9 +16028,7 @@ bool TryDecodeFCVTMU_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTMU  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTMU_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMU_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // FMAXNMP FMAXNMP_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -22320,9 +22312,7 @@ bool TryDecodeFCVTPS_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTPS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTPS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPS_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // FRINTP FRINTP_asimdmiscfp16_R:
+ //   0 x Rd       0
+@@ -25483,9 +25473,7 @@ bool TryDecodeFCVTZS_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTZS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTZS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTZS_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // FMAXNM FMAXNM_H_floatdp2:
+ //   0 x Rd       0
+@@ -30950,9 +30938,7 @@ bool TryDecodeFCVTPU_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTPU  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTPU_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPU_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // UQRSHL UQRSHL_asisdsame_only:
+ //   0 x Rd       0
+@@ -33328,9 +33314,7 @@ bool TryDecodeFCVTMS_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTMS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTMS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMS_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // FRINTA FRINTA_H_floatdp1:
+ //   0 x Rd       0
+@@ -34503,9 +34487,7 @@ bool TryDecodeFCVTAS_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTAS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTAS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAS_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // UQSHRN UQSHRN_asisdshf_N:
+ //   0 x Rd       0
+@@ -35784,9 +35766,7 @@ bool TryDecodeFCVTNS_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FCVTNS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFCVTNS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNS_ASIMDMISC_R: implemented in Arch.cpp (vector float-to-int).
+ 
+ // FDIV FDIV_asimdsamefp16_only:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+index 925c016..f0d2f21 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+@@ -27,18 +27,59 @@
+ #include "remill/Arch/Runtime/Types.h"
+ 
+ #include <cstdint>
++#include <limits>
+ #include <math.h>
++#include <type_traits>
+ 
+ namespace {
+ 
++// ARM's float-to-integer conversions SATURATE, and a `static_cast` does not:
++// out-of-range is undefined in C++, and what wasm actually produced for
++// (int32_t) 1e30f was 0x80000000 -- so `fcvtzs` on a large POSITIVE value
++// returned INT32_MIN where the hardware returns INT32_MAX. It went unnoticed
++// because the only out-of-range case anyone had tested was a negative input to
++// an unsigned form, which lands on the min side and happens to be right.
++// Caught by e2e/fcvtvec_test.go, which pins both ends against a native baseline.
++//
++// NaN converts to zero (FPToFixed's FPUnpack path). `v != v` rather than
++// std::isnan so this needs no <cmath>.
++template <typename S, typename D>
++ALWAYS_INLINE static D SaturatingFPToInt(S v) {
++  if (v != v) {
++    return static_cast<D>(0);
++  }
++  constexpr D lo = std::numeric_limits<D>::min();
++  constexpr D hi = std::numeric_limits<D>::max();
++  // Compared in the FLOAT domain, and `>=` is load-bearing: for the 64-bit
++  // destinations `hi` is not representable, so `static_cast<S>(hi)` rounds UP
++  // to 2^63 (or 2^64) and a `>` would let that exact value through to an
++  // undefined cast.
++  if (v <= static_cast<S>(lo)) {
++    return lo;
++  }
++  if (v >= static_cast<S>(hi)) {
++    return hi;
++  }
++  return static_cast<D>(v);
++}
++
++template <typename S, typename D>
++ALWAYS_INLINE static D CastOrSaturate(S v) {
++  if constexpr (std::is_floating_point<S>::value && std::is_integral<D>::value) {
++    return SaturatingFPToInt<S, D>(v);
++  } else {
++    return static_cast<D>(v);
++  }
++}
++
+ template <typename S, typename D>
+ ALWAYS_INLINE static D CheckedCastFPSRStatus(State &state, S src) {
+-  return CheckedFloatUnaryOp(state, [](S v) { return static_cast<D>(v); }, src);
++  return CheckedFloatUnaryOp(state, [](S v) { return CastOrSaturate<S, D>(v); }, src);
+ }
+ 
+ template <typename S, typename D>
+ ALWAYS_INLINE static D CheckedCast(State &state, S src) {
+-  return static_cast<D>(src);
++  return CastOrSaturate<S, D>(src);
+ }
+ 
+ // UCVTF  <Sd>, <Wn>
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index f35c709..1d01962 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -1823,6 +1823,147 @@ DEF_ISEL(SCVTF_ASIMDMISC_R_2S_FPSRSTATUS) = SCVTF_Vector32_FPSRStatus<VIi32v2, V
+ DEF_ISEL(SCVTF_ASIMDMISC_R_4S_FPSRSTATUS) = SCVTF_Vector32_FPSRStatus<VIi32v4, VIf32v4>;
+ DEF_ISEL(SCVTF_ASIMDMISC_R_2D_FPSRSTATUS) = SCVTF_Vector64_FPSRStatus<VIi64v2, VIf64v2>;
+ 
++// FCVT{Z,N,P,M,A}{S,U}  <Vd>.<T>, <Vn>.<T> -- vector float to integer.
++//
++// The inverse of SCVTF_Vector above, element for element, and it borrows two
++// decisions from work already done rather than re-deriving them:
++//
++//   * saturation comes from `CheckedCast`, exactly as the scalar FCVTZ* forms
++//     get it. That is what gives ARM's out-of-range and NaN results, so the
++//     ONLY thing a rounding mode changes is the value handed to the cast;
++//   * the rounding helpers are the ones patches 0004/0011/0028 settled on.
++//     wasm rounds to nearest-even natively, so `std::nearbyint` under the
++//     default FE_TONEAREST is FCVTN's ties-to-even and `std::round` is FCVTA's
++//     ties-away. FCVTZ* needs no helper: a C++ float-to-integer conversion
++//     already truncates toward zero, which is what Z means.
++namespace {
++
++// DB, the destination ELEMENT type, is a separate template parameter rather
++// than deduced from `res[0]`: subscripting a vector yields an lvalue, so
++// `decltype` gives `int &` and CheckedCast will not bind it. Spelling it out
++// also puts the signedness at each DEF_ISEL, which is the easy thing to get
++// wrong here -- FCVTZS and FCVTZU differ in nothing else.
++#define MAKE_FCVT_VECTOR(name, round, elem_size) \
++  template <typename S, typename D, typename DB> \
++  DEF_SEM_T_STATE(name##_Vector##elem_size, S src) { \
++    auto srcv = FReadVI##elem_size(src); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcv); i++) { \
++      res[i] = CheckedCast<float##elem_size##_t, DB>(state, round(srcv[i])); \
++    } \
++    return res; \
++  } \
++  template <typename S, typename D, typename DB> \
++  DEF_SEM_T_STATE(name##_Vector##elem_size##_FPSRStatus, S src) { \
++    auto srcv = FReadVI##elem_size(src); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcv); i++) { \
++      res[i] = CheckedCastFPSRStatus<float##elem_size##_t, DB>(state, round(srcv[i])); \
++    } \
++    return res; \
++  }
++
++// Round toward zero: no pre-rounding, the cast itself truncates.
++template <typename T>
++ALWAYS_INLINE static T FCVT_Trunc(T v) {
++  return v;
++}
++
++MAKE_FCVT_VECTOR(FCVTZ, FCVT_Trunc, 32)
++MAKE_FCVT_VECTOR(FCVTZ, FCVT_Trunc, 64)
++MAKE_FCVT_VECTOR(FCVTN, std::nearbyint, 32)
++MAKE_FCVT_VECTOR(FCVTN, std::nearbyint, 64)
++MAKE_FCVT_VECTOR(FCVTP, std::ceil, 32)
++MAKE_FCVT_VECTOR(FCVTP, std::ceil, 64)
++MAKE_FCVT_VECTOR(FCVTM, std::floor, 32)
++MAKE_FCVT_VECTOR(FCVTM, std::floor, 64)
++MAKE_FCVT_VECTOR(FCVTA, std::round, 32)
++MAKE_FCVT_VECTOR(FCVTA, std::round, 64)
++
++#undef MAKE_FCVT_VECTOR
++
++}  // namespace
++
++DEF_ISEL(FCVTZS_ASIMDMISC_R_2S) = FCVTZ_Vector32<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTZS_ASIMDMISC_R_4S) = FCVTZ_Vector32<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTZS_ASIMDMISC_R_2D) = FCVTZ_Vector64<VIf64v2, VIi64v2, int64_t>;
++// FPSR
++DEF_ISEL(FCVTZS_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTZ_Vector32_FPSRStatus<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTZS_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTZ_Vector32_FPSRStatus<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTZS_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTZ_Vector64_FPSRStatus<VIf64v2, VIi64v2, int64_t>;
++
++DEF_ISEL(FCVTZU_ASIMDMISC_R_2S) = FCVTZ_Vector32<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTZU_ASIMDMISC_R_4S) = FCVTZ_Vector32<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTZU_ASIMDMISC_R_2D) = FCVTZ_Vector64<VIf64v2, VIu64v2, uint64_t>;
++// FPSR
++DEF_ISEL(FCVTZU_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTZ_Vector32_FPSRStatus<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTZU_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTZ_Vector32_FPSRStatus<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTZU_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTZ_Vector64_FPSRStatus<VIf64v2, VIu64v2, uint64_t>;
++
++DEF_ISEL(FCVTNS_ASIMDMISC_R_2S) = FCVTN_Vector32<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTNS_ASIMDMISC_R_4S) = FCVTN_Vector32<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTNS_ASIMDMISC_R_2D) = FCVTN_Vector64<VIf64v2, VIi64v2, int64_t>;
++// FPSR
++DEF_ISEL(FCVTNS_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTN_Vector32_FPSRStatus<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTNS_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTN_Vector32_FPSRStatus<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTNS_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTN_Vector64_FPSRStatus<VIf64v2, VIi64v2, int64_t>;
++
++DEF_ISEL(FCVTNU_ASIMDMISC_R_2S) = FCVTN_Vector32<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTNU_ASIMDMISC_R_4S) = FCVTN_Vector32<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTNU_ASIMDMISC_R_2D) = FCVTN_Vector64<VIf64v2, VIu64v2, uint64_t>;
++// FPSR
++DEF_ISEL(FCVTNU_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTN_Vector32_FPSRStatus<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTNU_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTN_Vector32_FPSRStatus<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTNU_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTN_Vector64_FPSRStatus<VIf64v2, VIu64v2, uint64_t>;
++
++DEF_ISEL(FCVTPS_ASIMDMISC_R_2S) = FCVTP_Vector32<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTPS_ASIMDMISC_R_4S) = FCVTP_Vector32<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTPS_ASIMDMISC_R_2D) = FCVTP_Vector64<VIf64v2, VIi64v2, int64_t>;
++// FPSR
++DEF_ISEL(FCVTPS_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTP_Vector32_FPSRStatus<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTPS_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTP_Vector32_FPSRStatus<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTPS_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTP_Vector64_FPSRStatus<VIf64v2, VIi64v2, int64_t>;
++
++DEF_ISEL(FCVTPU_ASIMDMISC_R_2S) = FCVTP_Vector32<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTPU_ASIMDMISC_R_4S) = FCVTP_Vector32<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTPU_ASIMDMISC_R_2D) = FCVTP_Vector64<VIf64v2, VIu64v2, uint64_t>;
++// FPSR
++DEF_ISEL(FCVTPU_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTP_Vector32_FPSRStatus<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTPU_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTP_Vector32_FPSRStatus<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTPU_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTP_Vector64_FPSRStatus<VIf64v2, VIu64v2, uint64_t>;
++
++DEF_ISEL(FCVTMS_ASIMDMISC_R_2S) = FCVTM_Vector32<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTMS_ASIMDMISC_R_4S) = FCVTM_Vector32<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTMS_ASIMDMISC_R_2D) = FCVTM_Vector64<VIf64v2, VIi64v2, int64_t>;
++// FPSR
++DEF_ISEL(FCVTMS_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTM_Vector32_FPSRStatus<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTMS_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTM_Vector32_FPSRStatus<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTMS_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTM_Vector64_FPSRStatus<VIf64v2, VIi64v2, int64_t>;
++
++DEF_ISEL(FCVTMU_ASIMDMISC_R_2S) = FCVTM_Vector32<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTMU_ASIMDMISC_R_4S) = FCVTM_Vector32<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTMU_ASIMDMISC_R_2D) = FCVTM_Vector64<VIf64v2, VIu64v2, uint64_t>;
++// FPSR
++DEF_ISEL(FCVTMU_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTM_Vector32_FPSRStatus<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTMU_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTM_Vector32_FPSRStatus<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTMU_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTM_Vector64_FPSRStatus<VIf64v2, VIu64v2, uint64_t>;
++
++DEF_ISEL(FCVTAS_ASIMDMISC_R_2S) = FCVTA_Vector32<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTAS_ASIMDMISC_R_4S) = FCVTA_Vector32<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTAS_ASIMDMISC_R_2D) = FCVTA_Vector64<VIf64v2, VIi64v2, int64_t>;
++// FPSR
++DEF_ISEL(FCVTAS_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTA_Vector32_FPSRStatus<VIf32v2, VIi32v2, int32_t>;
++DEF_ISEL(FCVTAS_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTA_Vector32_FPSRStatus<VIf32v4, VIi32v4, int32_t>;
++DEF_ISEL(FCVTAS_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTA_Vector64_FPSRStatus<VIf64v2, VIi64v2, int64_t>;
++
++DEF_ISEL(FCVTAU_ASIMDMISC_R_2S) = FCVTA_Vector32<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTAU_ASIMDMISC_R_4S) = FCVTA_Vector32<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTAU_ASIMDMISC_R_2D) = FCVTA_Vector64<VIf64v2, VIu64v2, uint64_t>;
++// FPSR
++DEF_ISEL(FCVTAU_ASIMDMISC_R_2S_FPSRSTATUS) = FCVTA_Vector32_FPSRStatus<VIf32v2, VIu32v2, uint32_t>;
++DEF_ISEL(FCVTAU_ASIMDMISC_R_4S_FPSRSTATUS) = FCVTA_Vector32_FPSRStatus<VIf32v4, VIu32v4, uint32_t>;
++DEF_ISEL(FCVTAU_ASIMDMISC_R_2D_FPSRSTATUS) = FCVTA_Vector64_FPSRStatus<VIf64v2, VIu64v2, uint64_t>;
++
+ // REV32  <Vd>.<T>, <Vn>.<T>
+ namespace {
+ template <typename S>

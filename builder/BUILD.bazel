@@ -1,0 +1,212 @@
+# The LLVM companion tools, moved here from `RUN` lines in builder/Dockerfile.
+#
+# Each of these reads the bitcode elflift writes and writes bitcode the same
+# image's clang consumes, so what LLVM they link against is part of the
+# pipeline's identity. See //bazel:llvm_tool.bzl for why the recipe still calls
+# llvm-config rather than declaring a library list.
+#
+# ⚠️ These four files are in `internal/builder.translateSources`, so editing one
+# moves `raptormark.translate_sh` and invalidates every cached translated
+# object. That was true when they were built by the Dockerfile and it is still
+# true here -- moving the build did not move the identity.
+
+load("@raptormark_sdk//:defs.bzl", "LLVM_PREFIX", "SDK_SOURCE")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:llvm_tool.bzl", "llvm_tool")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Dockerfile"])
+
+# The register-promotion pass over elflift's remill-standard norm_mode bitcode.
+# translate-one runs it only when --promote is passed.
+llvm_tool(
+    name = "ecv-promote",
+    src = "ecv-promote.cpp",
+    components = [
+        "core",
+        "irreader",
+        "support",
+        "bitwriter",
+    ],
+)
+
+# Content-stable module partitioning. THE DEFAULT SINCE 2026-08-23 -- llvm-split
+# balances partitions by size across the whole module, so any change reshuffles
+# every bucket and no partition can be cached.
+llvm_tool(
+    name = "ecv-split",
+    src = "ecv-split.cpp",
+    hdrs = ["ecv-partition.h"],
+    components = [
+        "core",
+        "irreader",
+        "support",
+        "bitwriter",
+        "transformutils",
+    ],
+)
+
+# Per-program symbol namespacing, for the ECV_NO_MERGED_PREPARE path. Shares
+# ecv-namespace.h with ecv-prepare so the two cannot emit different bytes.
+llvm_tool(
+    name = "namespace-object",
+    src = "namespace-object.cpp",
+    hdrs = ["ecv-namespace.h"],
+    components = [
+        "core",
+        "irreader",
+        "support",
+        "bitwriter",
+    ],
+)
+
+# llvm-link + internalize/globaldce + namespacing in ONE parse, and the split
+# too when the partitioner is ours. The default path.
+llvm_tool(
+    name = "ecv-prepare",
+    src = "ecv-prepare.cpp",
+    hdrs = [
+        "ecv-namespace.h",
+        "ecv-partition.h",
+    ],
+    components = [
+        "core",
+        "irreader",
+        "support",
+        "bitwriter",
+        "linker",
+        "ipo",
+        "passes",
+        "transformutils",
+    ],
+)
+
+# Everything that lands in /usr/local/bin in the builder image.
+filegroup(
+    name = "tools",
+    srcs = [
+        ":ecv-prepare",
+        ":ecv-promote",
+        ":ecv-split",
+        ":namespace-object",
+    ],
+)
+
+# ── The builder image's contents ────────────────────────────────────────────
+#
+# Every file the image gains over its base, at the path it has in the image.
+# builder/Dockerfile is now a single `COPY stage/ /` over this tree plus the
+# labels, so the image's CONTENTS are declared here and its IDENTITY is declared
+# there. Nothing is built by the Dockerfile any more.
+#
+# ⚠️ WHY DOCKER STILL BUILDS THE FINAL LAYER, since the alternative was asked
+# for and rejected on measurement: `rules_oci` wants an OCI-layout base, and
+# this base is a 4.7 GB local-only image. `oci_pull` would materialise all of it
+# into Bazel's repository cache and `oci_load` would re-tar it on every build,
+# to add ~7 small files. Docker's layering adds them without touching the base.
+# The recipe leaving the Dockerfile is what was actually being asked for, and
+# that has happened; moving the 4.7 GB as well would be a large regression for
+# no gain. If the patched base is ever published to a registry, revisit it --
+# `oci_pull` + `oci_image` + `oci_push` is a genuinely better fit for THAT.
+genrule(
+    name = "stage",
+    srcs = [
+        ":ecv-prepare",
+        ":ecv-promote",
+        ":ecv-split",
+        ":namespace-object",
+        "//cmd/raptormark:builder_tools_linux_arm64",
+        "//runtime:ecv_globals",
+        "//runtime:ecv_sp",
+        "//runtime:ecvisor_wasm",
+        "//runtime/browser:ecvisor_wasm",
+        "//runtime/hosted:ecvisor_wasm",
+        "//runtime/wasix:ecvisor_wasm",
+        "//runtime/loopback:ecvisor_wasm",
+    ],
+    outs = [
+        "stage/opt/ecvisor/browser/libecvisor.a",
+        "stage/opt/ecvisor/ecv_globals.o",
+        "stage/opt/ecvisor/hosted/libecvisor.a",
+        "stage/opt/ecvisor/wasix/libecvisor.a",
+        "stage/opt/ecvisor/ecv_sp.o",
+        "stage/opt/ecvisor/libecvisor.a",
+        "stage/opt/ecvisor/loopback/libecvisor.a",
+        "stage/usr/local/bin/ecv-prepare",
+        "stage/usr/local/bin/ecv-promote",
+        "stage/usr/local/bin/ecv-split",
+        "stage/usr/local/bin/namespace-object",
+        "stage/usr/local/bin/raptormark-tools",
+    ],
+    # Every destination is named explicitly rather than derived from a glob.
+    # A file silently missing from the image is the failure mode here -- the
+    # kind that surfaces as `ecv-prepare: not found` half an hour into a
+    # translation -- and an explicit `outs` list makes Bazel fail the build
+    # instead, at the moment the file stops being produced.
+    cmd = """
+set -euo pipefail
+mkdir -p $(RULEDIR)/stage/opt/ecvisor/loopback $(RULEDIR)/stage/opt/ecvisor/browser $(RULEDIR)/stage/opt/ecvisor/hosted $(RULEDIR)/stage/opt/ecvisor/wasix \
+         $(RULEDIR)/stage/usr/local/bin
+cp $(execpath //runtime:ecvisor_wasm)          $(RULEDIR)/stage/opt/ecvisor/libecvisor.a
+cp $(execpath //runtime/loopback:ecvisor_wasm) $(RULEDIR)/stage/opt/ecvisor/loopback/libecvisor.a
+cp $(execpath //runtime/browser:ecvisor_wasm)  $(RULEDIR)/stage/opt/ecvisor/browser/libecvisor.a
+cp $(execpath //runtime/hosted:ecvisor_wasm)   $(RULEDIR)/stage/opt/ecvisor/hosted/libecvisor.a
+cp $(execpath //runtime/wasix:ecvisor_wasm)    $(RULEDIR)/stage/opt/ecvisor/wasix/libecvisor.a
+cp $(execpath //runtime:ecv_sp)                $(RULEDIR)/stage/opt/ecvisor/ecv_sp.o
+cp $(execpath //runtime:ecv_globals)           $(RULEDIR)/stage/opt/ecvisor/ecv_globals.o
+cp $(execpath :ecv-prepare)                    $(RULEDIR)/stage/usr/local/bin/ecv-prepare
+cp $(execpath :ecv-promote)                    $(RULEDIR)/stage/usr/local/bin/ecv-promote
+cp $(execpath :ecv-split)                      $(RULEDIR)/stage/usr/local/bin/ecv-split
+cp $(execpath :namespace-object)               $(RULEDIR)/stage/usr/local/bin/namespace-object
+cp $(execpath //cmd/raptormark:builder_tools_linux_arm64) \\
+                                               $(RULEDIR)/stage/usr/local/bin/raptormark-tools
+chmod +x $(RULEDIR)/stage/usr/local/bin/*
+""",
+    visibility = ["//visibility:public"],
+)
+
+# The four tools must still be byte-identical to what builder/Dockerfile's `RUN`
+# lines produced. Verified 2026-08-23, 4/4. See the script header for why a
+# transcription of the deleted recipe is the right shape for this check.
+#
+# ⚠️ IMAGE MODE ONLY, and the reason is the test's own premise. It rebuilds each
+# tool with the recipe the Dockerfile used -- `llvm-config --cxxflags --ldflags
+# --libs`, with no `--system-libs`. That recipe cannot LINK against the upstream
+# LLVM at all: it fails on zlib (`compressBound`, `compress2`, `uncompress`) and
+# terminfo (`setupterm`, `tigetnum`), because Debian's LLVM resolves those
+# through one shared libLLVM while upstream's static components need them named.
+#
+# ❌ The fix is NOT to add `--system-libs` to the reference. That would make the
+# test compare the rule against a copy of itself -- an assertion written in terms
+# of the very thing it claims to check, which this project has been caught by
+# before. The historical recipe is the point.
+#
+# The cross-mode question -- does hermetic produce equivalent tools? -- is a
+# different one and cannot be a `bazel test` at all, because a test sees one
+# toolchain. `builder/hermetic_differential.sh` answers it, and its answer is
+# more precise than a hash comparison: the tools differ, their bitcode differs
+# by the version string, the emitted OBJECTS are identical.
+sh_test(
+    name = "tools_equivalence_test",
+    size = "medium",
+    target_compatible_with = [] if SDK_SOURCE == "image" else ["@platforms//:incompatible"],
+    srcs = ["tools_equivalence_test.sh"],
+    data = [
+        "ecv-namespace.h",
+        "ecv-partition.h",
+        "ecv-prepare.cpp",
+        "ecv-promote.cpp",
+        "ecv-split.cpp",
+        "namespace-object.cpp",
+        ":ecv-prepare",
+        ":ecv-promote",
+        ":ecv-split",
+        ":namespace-object",
+    ],
+    env = {"LLVM_PREFIX": LLVM_PREFIX},
+    tags = [
+        "local",
+        "no-remote",
+    ],
+)

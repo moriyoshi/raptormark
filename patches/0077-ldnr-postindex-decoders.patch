@@ -1,0 +1,182 @@
+LD1R/LD2R/LD3R/LD4R post-index -- decoders.
+
+Companion to 0076, which did the plain replicate forms. All four post-index
+variants (`LD<n>R_ASISDLSOP_R<n>_I`) were `return false` stubs, so they were
+fatal `undecoded instruction`.
+
+Measured 2026-09-01: with 0076 applied, a Go 1.26 hello-world got four
+instructions further and stopped on
+
+    1ef54: 4dffe804  ld4r {v4.4s-v7.4s}, [x0], #16
+    1ef58: 4dffe808  ld4r {v8.4s-v11.4s}, [x0], #16
+
+`RAPTORMARK_ECV_UNDEC_CENSUS=1` showed these were the LAST TWO distinct
+undecoded addresses in the whole run -- with them skipped the binary reached the
+512 MiB page-summary reservation and printed a normal traceback, the same place
+`gosu` stops. So this patch is what completes Go 1.26 support, and enumerating
+with the census beat chasing one fatal address per rebuild.
+
+❗ SEMANTICS ARE SHARED with the plain forms and the ISELs point at the same
+functions. The base-register update is not the semantic's job: `AddPostIndexMemOp`
+carries it and the lifter applies it after the call, exactly as in 0072-0074.
+
+⚠️ The access size stays ONE element while the advance is
+`num_regs * elem_bytes` -- `ld4r {v4.4s-v7.4s}, [x0], #16` reads four 4-byte
+elements and advances 16. Passing the total as the access size would have given
+the memory operand a type the single-element semantics does not take.
+
+Not covered: the register-offset replicate forms (`*_ASISDLSOP_RX<n>_R`,
+i.e. `[Xn], Xm`). They keep their stubs, still fail loudly, and nothing measured
+executes one.
+
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -24650,9 +24650,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD3R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeLD3R_ASISDLSOP_R3_I(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD3R_ASISDLSOP_R3_I is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD3R LD3R_asisdlsop_RX3_r:
+ //   0 x Rt       0
+@@ -32588,9 +32587,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD2R  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeLD2R_ASISDLSOP_R2_I(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD2R_ASISDLSOP_R2_I is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD2R LD2R_asisdlsop_RX2_r:
+ //   0 x Rt       0
+@@ -35358,9 +35356,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD4R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeLD4R_ASISDLSOP_R4_I(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD4R_ASISDLSOP_R4_I is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD4R LD4R_asisdlsop_RX4_r:
+ //   0 x Rt       0
+@@ -35774,9 +35771,8 @@
+ //  30 x Q        0
+ //  31 0
+ // LD1R  { <Vt>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeLD1R_ASISDLSOP_R1_I(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeLD1R_ASISDLSOP_R1_I is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // LD1R LD1R_asisdlsop_RX1_r:
+ //   0 x Rt       0
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7430,6 +7430,50 @@
+   return TryDecodeLDnR(data, inst, 4);
+ }
+ 
++// LD<n>R { ... }, [<Xn|SP>], <imm> -- POST-INDEX.
++//
++// Same operands as the plain forms; only the memory operand differs.
++// `AddPostIndexMemOp` carries the base-register update and the lifter applies
++// it after the call, so the SEMANTICS are shared with the non-post-index forms
++// -- the ISELs below point at the same functions.
++//
++// ❗ The access size stays ONE element, as in `TryDecodeLDnR`, while the
++// advance is `num_regs * elem_bytes`: `ld4r {v4.4s-v7.4s}, [x0], #16` reads
++// four 4-byte elements and advances 16.
++static bool TryDecodeLDnR_POSTINDEX(const InstData &data, Instruction &inst, uint8_t num_regs) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  auto elem_size = 8UL << data.size;
++  auto total_size = data.Q ? 128 : 64;
++  auto t = static_cast<uint8_t>(data.Rt);
++  for (uint8_t i = 0; i < num_regs; ++i) {
++    AddRegOperand(inst, kActionWrite, ArrangementRegClass(total_size, elem_size), kUseAsValue,
++                  static_cast<aarch64::RegNum>((t + i) % 32));
++  }
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  AddPostIndexMemOp(inst, elem_size, data.Rn, num_regs * (elem_size / 8));
++  return true;
++}
++
++// LD1R  { <Vt>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeLD1R_ASISDLSOP_R1_I(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR_POSTINDEX(data, inst, 1);
++}
++
++// LD2R  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeLD2R_ASISDLSOP_R2_I(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR_POSTINDEX(data, inst, 2);
++}
++
++// LD3R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeLD3R_ASISDLSOP_R3_I(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR_POSTINDEX(data, inst, 3);
++}
++
++// LD4R  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeLD4R_ASISDLSOP_R4_I(const InstData &data, Instruction &inst) {
++  return TryDecodeLDnR_POSTINDEX(data, inst, 4);
++}
++
+ // LD4  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
+ bool TryDecodeLD4_ASISDLSEP_I4_I(const InstData &, Instruction &) {
+   return false;
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -2166,6 +2166,45 @@
+ DEF_ISEL(LD4R_ASISDLSO_R4_1D) = LD4R_64<VIu64v1, M64>;
+ DEF_ISEL(LD4R_ASISDLSO_R4_2D) = LD4R_64<VIu64v2, M64>;
+ 
++// Post-index replicate: identical semantics to the plain forms above -- the
++// base-register update rides on the memory operand, not on the semantic.
++
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_8B) = LD1R_8<VIu8v8, M8>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_16B) = LD1R_8<VIu8v16, M8>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_4H) = LD1R_16<VIu16v4, M16>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_8H) = LD1R_16<VIu16v8, M16>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_2S) = LD1R_32<VIu32v2, M32>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_4S) = LD1R_32<VIu32v4, M32>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_1D) = LD1R_64<VIu64v1, M64>;
++DEF_ISEL(LD1R_ASISDLSOP_R1_I_2D) = LD1R_64<VIu64v2, M64>;
++
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_8B) = LD2R_8<VIu8v8, M8>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_16B) = LD2R_8<VIu8v16, M8>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_4H) = LD2R_16<VIu16v4, M16>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_8H) = LD2R_16<VIu16v8, M16>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_2S) = LD2R_32<VIu32v2, M32>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_4S) = LD2R_32<VIu32v4, M32>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_1D) = LD2R_64<VIu64v1, M64>;
++DEF_ISEL(LD2R_ASISDLSOP_R2_I_2D) = LD2R_64<VIu64v2, M64>;
++
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_8B) = LD3R_8<VIu8v8, M8>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_16B) = LD3R_8<VIu8v16, M8>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_4H) = LD3R_16<VIu16v4, M16>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_8H) = LD3R_16<VIu16v8, M16>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_2S) = LD3R_32<VIu32v2, M32>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_4S) = LD3R_32<VIu32v4, M32>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_1D) = LD3R_64<VIu64v1, M64>;
++DEF_ISEL(LD3R_ASISDLSOP_R3_I_2D) = LD3R_64<VIu64v2, M64>;
++
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_8B) = LD4R_8<VIu8v8, M8>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_16B) = LD4R_8<VIu8v16, M8>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_4H) = LD4R_16<VIu16v4, M16>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_8H) = LD4R_16<VIu16v8, M16>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_2S) = LD4R_32<VIu32v2, M32>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_4S) = LD4R_32<VIu32v4, M32>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_1D) = LD4R_64<VIu64v1, M64>;
++DEF_ISEL(LD4R_ASISDLSOP_R4_I_2D) = LD4R_64<VIu64v2, M64>;
++
+ // MOV  <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]
+ namespace {
+ 

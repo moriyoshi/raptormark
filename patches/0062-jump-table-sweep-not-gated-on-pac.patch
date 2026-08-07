@@ -1,0 +1,52 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+index 225ae9c..fe1379b 100644
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -1172,7 +1172,37 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+           entry_word == 0xD50324DFU ||  // bti jc
+           entry_word == 0xD503233FU ||  // paciasp
+           entry_word == 0xD503237FU;    // pacibsp
+-      if (br_bb && seeded == 0 && entry_read && !entry_is_landing_pad) {
++      // raptormark 0062: `entry_is_landing_pad` moved OFF the symtab sweep and
++      // onto the orphan heuristic alone, which is where patch 0013 put it and
++      // where its evidence came from.
++      //
++      // `paciasp`/`pacibsp` prove PAC (return-address signing). They do NOT prove
++      // BTI, and only BTI puts landing pads on jump-table cases -- so the premise
++      // above ("a BTI/PAC binary marks every function entry with a landing pad",
++      // therefore a `seeded == 0` function's BR must be a tail call) does not
++      // hold for a function compiled pac-ret without bti. Measured on
++      // `ruby:3-slim`: `rb_method_definition_set` opens with `paciasp` and
++      // contains ZERO `bti j` in its 2,112 bytes, so its jump table has no pads
++      // at all -- yet the guard read the entry as one and skipped the sweep. The
++      // BR then missed the block map, fell to `L_far_jump` -> `__remill_jump`,
++      // re-entered the function with sp == 0, and the re-entered prologue's
++      // `stp x29, x30, [sp, #32]` stored at -0x40 == 0xffffffc0. That is the same
++      // failure this block already documents for nginx, arriving by a route the
++      // guard did not anticipate.
++      //
++      // A binary is not BTI or non-BTI; a FUNCTION is. ruby's closure carries
++      // 2,314 `bti c` entries against 8,681 `paciasp` ones because glibc is
++      // branch-protected and libruby is not, and `seeded == 0` -- already in this
++      // same condition -- asks the per-function question directly.
++      //
++      // ⚠️ The guard is KEPT for the orphan heuristic below. Patch 0013 added it
++      // after orphan seeding pulled post-tail-call padding into a postgres trace
++      // and unlifted a query-path block ("no lifted instruction", JOURNAL 5bw).
++      // That evidence is about the orphan scan, which seeds by a PREDECESSOR
++      // heuristic over an unbounded run; the symtab sweep seeds only inside one
++      // symbol's own `[start, end)`. Different mechanism, different blast radius,
++      // so the guard stays exactly where it was earned.
++      if (br_bb && seeded == 0 && entry_read) {
+         // With a symbol table, sweep the function's OWN [start, end) and seed every
+         // instruction that direct discovery missed. This is upstream's original
+         // lift-every-instruction pass, which the BTI scan above replaced wholesale;
+@@ -1207,7 +1237,7 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+               ++seeded;
+             }
+           }
+-        } else {
++        } else if (!entry_is_landing_pad) {
+           // No symbol table: bound the orphan scan to the current function's DISCOVERED
+           // extent, not to `kFuncCap`/next `bti c`. A non-BTI binary has NO `bti c` markers,
+           // so the bti scan above ran to kFuncCap (512 KiB) crossing dozens of functions --

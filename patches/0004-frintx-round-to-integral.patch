@@ -1,0 +1,93 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..f682979 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -3453,6 +3453,30 @@ bool TryDecodeFRINTM_D_FLOATDP1(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// FRINTX  <Sd>, <Sn>
++// Round to integral using the current rounding mode (default RN = ties-to-even),
++// signalling Inexact. Decoding mirrors FRINTM; only the semantics differ.
++bool TryDecodeFRINTX_S_FLOATDP1(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  AddRegOperand(inst, kActionWrite, kRegS, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  if (inst.lift_config.float_exception_enabled) {
++    AddArrangementSpecifierFPSRStatus(inst);
++  }
++  return true;
++}
++
++// FRINTX  <Dd>, <Dn>
++bool TryDecodeFRINTX_D_FLOATDP1(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  AddRegOperand(inst, kActionWrite, kRegD, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  if (inst.lift_config.float_exception_enabled) {
++    AddArrangementSpecifierFPSRStatus(inst);
++  }
++  return true;
++}
++
+ // FRINTM  <Vd>.<T>, <Vn>.<T>
+ bool TryDecodeFRINTM_ASIMDMISC_R(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::State;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..7e4b293 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -4463,10 +4463,7 @@ bool TryDecodeFRINTX_H_FLOATDP1(const InstData &, Instruction &) {
+ //  29 0 S        0
+ //  30 0
+ //  31 0 M        0
+-// FRINTX  <Sd>, <Sn>
+-bool TryDecodeFRINTX_S_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// FRINTX  <Sd>, <Sn>  -- implemented in Arch.cpp
+ 
+ // FRINTX FRINTX_D_floatdp1:
+ //   0 x Rd       0
+@@ -4501,10 +4498,7 @@ bool TryDecodeFRINTX_S_FLOATDP1(const InstData &, Instruction &) {
+ //  29 0 S        0
+ //  30 0
+ //  31 0 M        0
+-// FRINTX  <Dd>, <Dn>
+-bool TryDecodeFRINTX_D_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// FRINTX  <Dd>, <Dn>  -- implemented in Arch.cpp
+ 
+ // LDUMAXAB LDUMAXAB_32_memop:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+index 925c016..5503961 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+@@ -370,6 +370,25 @@ DEF_SEM_F64_STATE(FRINTM_D, RF64 src) {
+ DEF_ISEL(FRINTM_D_FLOATDP1) = FRINTM_D;
+ DEF_ISEL(FRINTM_D_FLOATDP1_FPSRSTATUS) = FRINTM_D;
+ 
++// FRINTX  <Sd>, <Sn> / <Dd>, <Dn>
++// Round to integral using the CURRENT rounding mode (FPCR.RMode; default RN =
++// round-to-nearest, ties-to-EVEN) -- which is std::rint, not std::round and not
++// FRINTA's ties-away-from-zero. WebAssembly's FP is always round-to-nearest
++// ties-to-even, matching the ARM default, so this lowers exactly.
++namespace {
++DEF_SEM_F32_STATE(FRINTX_S, RF32 src) {
++  return std::rint(Read(src));
++}
++DEF_SEM_F64_STATE(FRINTX_D, RF64 src) {
++  return std::rint(Read(src));
++}
++}  // namespace
++
++DEF_ISEL(FRINTX_S_FLOATDP1) = FRINTX_S;
++DEF_ISEL(FRINTX_S_FLOATDP1_FPSRSTATUS) = FRINTX_S;
++DEF_ISEL(FRINTX_D_FLOATDP1) = FRINTX_D;
++DEF_ISEL(FRINTX_D_FLOATDP1_FPSRSTATUS) = FRINTX_D;
++
+ // FRINTM  <Vd>.<T>, <Vn>.<T>
+ namespace {
+ template <typename S>

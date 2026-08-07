@@ -1,0 +1,71 @@
+{
+  "recorded": "2026-08-31T17:18:41Z",
+  "entries": [
+    {
+      "kind": "image",
+      "name": "raptormark-builder:brkgrow",
+      "note": "The CURRENT builder (2026-08-27). Carries the grown fused region -- BRK_START_VMA 0x0C000000, brk 8 MiB, mmap 152 MiB -- so postgres:17 and :18 plan a SHARED layout. Same base_id and translate_sh as :rebal, so it shares the object cache; its libecvisor.a differs, which is the check that proves the runtime change is actually in the image. Reproducible: it layers onto raptormark-elfconv-base-patched:wasix.",
+      "id": "sha256:af324412d6bd7f1ee98824cd0e5e70b41f8ac98a0e51bae20a219f125a45a0cd"
+    },
+    {
+      "kind": "image",
+      "name": "raptormark-builder:fsync",
+      "note": "The last PRE-WIPE builder (2026-08-11), the other survivor of the 2026-08-23 mass removal. TRULY unreproducible: its patched base is gone, so it can never be rebuilt. ❌ NOT a usable fallback -- it has no ecv-prepare and cannot run todays pipeline. Its only value is as an audit baseline for \"did the wipe lose this?\", which is a diff against a surviving image and impossible once it goes.",
+      "id": "sha256:dd2197acc31eda8430f16634d5e602a042aec372567614e0d455b3aedcba0ae8"
+    },
+    {
+      "kind": "image",
+      "name": "raptormark-builder:lbport",
+      "note": "A builder from 2026-08-25. ⚠️ Its note here used to read \"Newest builder (2026-08-25)\" and that has been FALSE since raptormark-builder:rebal was built on 2026-08-26 -- corrected rather than left, because a manifest whose notes drift is read as a directory of what to use. Same reproducibility as rebal: it layers onto raptormark-elfconv-base-patched:wasix.",
+      "id": "sha256:cbc8865bba2826502708ff9a76e42ec12d18def8b0d6810f487b10ead0bbadec"
+    },
+    {
+      "kind": "image",
+      "name": "raptormark-builder:rebal",
+      "note": "The builder from 2026-08-26, superseded by :brkgrow on 2026-08-27. ⚠️ Its runtime still has BRK_START_VMA 0x0A000000, so pairing it with a current host fuser produces a module whose libraries can sit where the guest heap starts -- TestBrkStartMatchesTheRuntime compares SOURCE to SOURCE and cannot see that. Kept as the last builder before the region grew.",
+      "id": "sha256:938facb542e308191c0b154499c9cc979c79a49d980ea9ea86f3abb169095635"
+    },
+    {
+      "kind": "image",
+      "name": "raptormark-elfconv-base-patched:wasix",
+      "note": "The patched elfconv base. NOT reproducible from this tree: re-applying the patch series can yield a different image id, which invalidates every cached object. AGENTS.md forbids docker system prune for this.",
+      "id": "sha256:073dfae65ee40e508518750a40d57df976009d334dd90b37befc2ed609303b5a"
+    },
+    {
+      "kind": "image",
+      "name": "raptormark-elfconv-base:8bfe80860118",
+      "note": "THE CLEAN PIN, and the thing .agents-workspace/objcache is keyed on. Tag == third_party/elfconv HEAD (verified 2026-08-26); every raptormark-elfconv-base-patched:* is build-image re-applying patches/ to this. The recipe survives in the submodule, so it is REBUILDABLE -- but a rebuild yields a different image id, so BASE_ID changes and all 7.7 GB of objcache misses on every entry (LTM/recovery-and-builder-provenance.md). One of only two images that survived the 2026-08-23 mass removal. Recorded because the manifest guarded the cache but not the identity the cache is keyed on: losing this does not delete objcache, it makes every entry in it permanently dead while check still reported ok.",
+      "id": "sha256:b78c7b0d591f0ab2ac4e04c3081f3d881e49f372579c6e275b22f7200d710347"
+    },
+    {
+      "kind": "path",
+      "name": ".agents-workspace/drivers",
+      "note": "Scratch driver SOURCES and rebuild-drivers.sh. A tmp cleanup already destroyed this once, taking 20 driver binaries; the sources survived by luck."
+    },
+    {
+      "kind": "path",
+      "name": ".agents-workspace/fixtures",
+      "note": "Fused ELF fixtures. postgres-glibc.fused needs an image export plus a fuse to regenerate; every build-speed probe references them."
+    },
+    {
+      "kind": "path",
+      "name": ".agents-workspace/longjmp",
+      "note": "setjmp/longjmp reproducers from the 2026-08-28 investigation, with a README recording what each one establishes and which hypotheses they killed. Cheap to re-run, expensive to re-derive: seven hypotheses were refuted to get here, two of them my own mid-investigation conclusions."
+    },
+    {
+      "kind": "path",
+      "name": ".agents-workspace/multimodule-poc",
+      "note": "Measurement apparatus that durable docs cite BY PATH: .agents/docs/WASIX_ABI.md and LTM/wasix-and-wasmer.md name wasmer/{socksigs.sh,socknet.wat,socknb.wat,fork.wat,spawn.wat,mkchild.py,src/}; MULTIMODULE.md names multimodule-poc/{tablescale.mjs,callcost/}. Both were deliberately MOVED out of .agents-workspace/tmp/ to survive its wipes -- the same reason drivers/ and fixtures/ are recorded, and the same reason a tmp cleanup already destroyed 20 driver binaries once. The docs record the FINDINGS; these are the instruments, and a cited path that no longer exists cannot be re-run to check a finding."
+    },
+    {
+      "kind": "path",
+      "name": ".agents-workspace/objcache",
+      "note": "7.7 GB content-addressed object cache. Regenerable but costs hours of translation; a cold cache is how a runtime-only change turns into an afternoon."
+    },
+    {
+      "kind": "path",
+      "name": ".agents-workspace/wasmer",
+      "note": "Measurement apparatus that durable docs cite BY PATH: .agents/docs/WASIX_ABI.md and LTM/wasix-and-wasmer.md name wasmer/{socksigs.sh,socknet.wat,socknb.wat,fork.wat,spawn.wat,mkchild.py,src/}; MULTIMODULE.md names multimodule-poc/{tablescale.mjs,callcost/}. Both were deliberately MOVED out of .agents-workspace/tmp/ to survive its wipes -- the same reason drivers/ and fixtures/ are recorded, and the same reason a tmp cleanup already destroyed 20 driver binaries once. The docs record the FINDINGS; these are the instruments, and a cited path that no longer exists cannot be re-run to check a finding."
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+diff --git a/lifter/Lift.cpp b/lifter/Lift.cpp
+--- a/lifter/Lift.cpp
++++ b/lifter/Lift.cpp
+@@ -18,6 +18,7 @@
+ #include "remill/BC/TraceLifter.h"
+ #include "remill/BC/Util.h"
+ 
++#include <chrono>
+ #include <cstdint>
+ #if defined(__linux__)
+ #  include <signal.h>
+@@ -61,6 +62,19 @@
+               "runs the full SetELFData, so all shards share one entry set and make identical "
+               "trace-extension decisions; only the LIFTING is divided. Unset means lift all.");
+ 
++
++// Outer-phase accounting. decode+emit are ~4.5% of a lift and the WHOLE
++// instruction work-list loop is ~6.6%, so the cost is out here. Printed with
++// ECV_DECODE_STATS alongside the inner numbers.
++static std::chrono::steady_clock::time_point ecv_ph0;
++static double ecv_sem_s = 0, ecv_meta_s = 0, ecv_traceloop_s = 0, ecv_subseq_s = 0,
++              ecv_prepare_s = 0;
++#define ECV_PHASE_BEGIN() ecv_ph0 = std::chrono::steady_clock::now()
++#define ECV_PHASE_END(acc) \
++  acc += std::chrono::duration_cast<std::chrono::nanoseconds>( \
++             std::chrono::steady_clock::now() - ecv_ph0) \
++             .count() / 1e9
++
+ ArchName remill::EcvReg::target_elf_arch;
+ 
+ extern "C" void debug_stream_out_sigaction(int sig, siginfo_t *info, void *ctx) {
+@@ -95,9 +109,11 @@
+   auto arch_name = remill::GetArchName(FLAGS_arch);
+   auto arch = remill::Arch::Build(&context, os_name,
+                                   arch_name);  // e.g., arch = std::unique_ptr<AArch64Arch>
++  ECV_PHASE_BEGIN();
+   auto module = FLAGS_bitcode_path.empty()
+                     ? remill::LoadArchSemantics(arch.get())
+                     : remill::LoadArchSemantics(arch.get(), {FLAGS_bitcode_path.c_str()});
++  ECV_PHASE_END(ecv_sem_s);
+ 
+   // Set wasm32-unknown-wasi and wasm32 data layout if necessary.
+   if (manager.target_arch == "wasi32") {
+@@ -127,7 +143,9 @@
+ 
+   // Set various common metadata not depending on whether the ELF binary is not stripped or not.
+   // entry point, program header, every data sections, etc.
++  ECV_PHASE_BEGIN();
+   main_lifter.SetCommonMetaData(lift_config);
++  ECV_PHASE_END(ecv_meta_s);
+ 
+   // Lift every function.
+   std::unordered_map<uint64_t, const char *> addr_fun_name_map;
+@@ -171,6 +189,7 @@
+     return shard_n == 1 || shard_of(addr) % shard_n == shard_i;
+   };
+ 
++  ECV_PHASE_BEGIN();
+   do {
+     manager.rest_disasm_funcs.clear();
+     for (const auto &[addr, dasm_func] : manager.disasm_funcs) {
+@@ -198,6 +217,7 @@
+       manager.disasm_funcs.insert({rest_addr, disasm_func});
+     }
+   } while (!manager.rest_disasm_funcs.empty());
++  ECV_PHASE_END(ecv_traceloop_s);
+ 
+   // If we lift with `test_mode`, we should disable `able_vrp_opt`.
+   manager.elf_obj.able_vrp_opt = !lift_config.norm_mode;
+@@ -206,7 +226,9 @@
+   if (manager.elf_obj.able_vrp_opt) {
+     main_lifter.SubseqOfLifting(addr_fun_name_map);
+   } else {
++    ECV_PHASE_BEGIN();
+     main_lifter.SubseqForNoOptLifting(addr_fun_name_map);
++    ECV_PHASE_END(ecv_subseq_s);
+     printf("[\x1b[32mINFO\x1b[0m] detected funcs num: %ld\n", addr_fun_name_map.size());
+ /* Debug functions */
+ // Insert `debug_state_machine` to the every instruction.
+@@ -221,7 +243,15 @@
+ 
+   // Prepare and validate the LLVM Module.
+   auto host_arch = remill::Arch::Build(&context, os_name, remill::GetArchName(REMILL_ARCH));
++  ECV_PHASE_BEGIN();
+   host_arch->PrepareModule(module.get());
++  ECV_PHASE_END(ecv_prepare_s);
++  if (getenv("ECV_DECODE_STATS")) {
++    fprintf(stderr,
++            "[ecv] semantics %.3fs  metadata %.3fs  traceloop %.3fs  subseq %.3fs  prepare %.3fs\n",
++            ecv_sem_s, ecv_meta_s, ecv_traceloop_s, ecv_subseq_s, ecv_prepare_s);
++    fflush(stderr);
++  }
+   // Make LLVM bitcode file.
+   remill::StoreModuleToFile(module.get(), FLAGS_bc_out);
+ 

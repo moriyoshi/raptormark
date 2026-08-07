@@ -1,0 +1,57 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+index 86cbd18..7f33085 100644
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -533,6 +533,52 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+         case Instruction::kCategoryDirectJump: {
+           try_add_delay_slot(true, block);
+           auto callee_def_func = get_trace_decl(inst.branch_taken_pc);
++          // `get_trace_decl` answers only for a known function entry, so a
++          // non-null callee means this `b` LEAVES the current function: it is a
++          // tail call, not a local jump. Extending the trace into the callee --
++          // what this did unconditionally -- makes one lifted function absorb
++          // everything reachable through a chain of tail calls. Measured on the
++          // nginx closure, `EVP_PKEY_meth_get0` (a trivial accessor) became
++          // 469,873 instructions in 94,578 basic blocks, 83.9% of its
++          // partition. llvm-split cannot divide it, because it keeps a function
++          // whole, and clang did not finish it in 1h35m at either -O1 or -O0.
++          //
++          // A jump that stays inside this function's own [start, end) is a
++          // local branch even when it lands on something the symbol table calls
++          // an entry: synthesized `_ecv_fde_*` boundaries can split one real
++          // function in two, and turning a loop back-edge into a call would
++          // recurse until the stack died. Those keep the old inlining path.
++          // Without a symbol table there are no reliable bounds, so nothing is
++          // treated as a tail call.
++          const bool leaves_func =
++              callee_def_func && lift_config.has_symtab && inst.branch_taken_pc != trace_addr &&
++              !(inst.branch_taken_pc > trace_addr &&
++                inst.branch_taken_pc < manager.GetFuncVMA_E(trace_addr));
++
++          if (leaves_func) {
++            trace_work_list.insert(inst.branch_taken_pc);
++            llvm::IRBuilder<> ir(block);
++            llvm::CallInst *lifted_func_call = AddCall(
++                ir, block, callee_def_func, *intrinsics,
++                llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), inst.branch_taken_pc));
++            virtual_regs_opt->lifted_func_caller_set.insert(lifted_func_call);
++            // Deliberately NO `_ecv_save_call_history`, no `_ecv_func_epilogue`
++            // and no entry in `lift_or_system_calling_bbs`.
++            //
++            // A tail call leaves the link register alone -- the callee returns
++            // to OUR caller -- and `_ecv_save_call_history` would overwrite x30
++            // with a return address that is not one. It would also be a lie for
++            // replay: the history's second word is the block a re-entered frame
++            // resumes at, and after this jump there is no block in this
++            // function to resume at. Omitting the entry is not a shortcut but
++            // the correct model, because this frame contributes nothing to the
++            // continuation -- a real tail call pops it. Replay then rebuilds
++            // the callee directly beneath our caller, which is what the machine
++            // would have had.
++            ir.CreateRetVoid();
++            break;
++          }
++
+           if (callee_def_func) {
+             if (VirtualRegsOpt::b_jump_callees_map.contains(func)) {
+               VirtualRegsOpt::b_jump_callees_map.at(func).push_back(callee_def_func);

@@ -1,0 +1,116 @@
+LD1 single-element post-index: operand order must match the semantics.
+
+The eight `TryDecodeLD1_ASISDLSOP_*` decoders emit their operands as
+(vector, index-immediate, memory) while the semantics they are wired to,
+`LD1_LANE_{8,16,32,64}`, are declared
+
+    DEF_SEM_T_RUN(LD1_LANE_N, V dst_vec, M src_mem, I32 index_imm)
+
+i.e. (vector, memory, index). The memory operand therefore lands on the `I32`
+parameter and remill aborts in InstructionLifter::LiftOperand:
+
+    Expected that a memory operand should be represented by machine word type.
+    Argument type is i32 and word type is i64 in instruction at 0x7d764
+
+Found translating `gosu` out of postgres:17 -- a statically linked Go binary.
+The instruction is `0ddf8402  ld1 {v2.d}[0], [x0], #8` inside the Go runtime's
+`aeshashbody`, which is the AES-accelerated map hash, so this is reachable from
+essentially any Go binary that uses maps. It is real code, not a mis-bounded
+function: 25 of the 29 undecoded encodings in that build were 0x00000000 and
+this is not one of them.
+
+The fix is the decoders', not the semantics'. The four NON-post-index forms in
+the same family (`LD1_ASISDLSO_*`) already emit (vector, memory, index) and are
+wired to the same `LD1_LANE_*` semantics, so the post-index eight are the
+outliers. ST1 is deliberately untouched: its semantics are declared
+(src, I32 index, M dst_mem) and its decoders already match that order -- the two
+families genuinely differ, which is why this only moves LD1.
+
+Not fixed here, and not a defect: the `LD1_ASISDLSO_*` forms pass an access size
+in BYTES (1/2/4/8) where every other decoder passes BITS. `LiftAddressOperand`
+never reads `Operand::size`, so the width comes from the `M8`/`M16`/`M32`/`M64`
+template parameter and nothing observes the discrepancy. Left alone rather than
+"tidied" so this patch changes exactly one behaviour.
+
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7132,8 +7132,8 @@
+   // index = Q:S:size[1:0] (4 bits, 0-15)
+   uint64_t index = (data.Q << 3) | (data.S << 2) | data.size;
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 8, data.Rn, 1);  // 1 byte access, post-increment by 1
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7142,8 +7142,8 @@
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+   uint64_t index = (data.Q << 3) | (data.S << 2) | data.size;
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 8, data.Rn, data.Rm);  // 1 byte access, post-increment by Xm
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7153,8 +7153,8 @@
+   // index = Q:S:size[1] (3 bits, 0-7)
+   uint64_t index = (data.Q << 2) | (data.S << 1) | ((data.size >> 1) & 1);
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 16, data.Rn, 2);  // 2 byte access, post-increment by 2
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7163,8 +7163,8 @@
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+   uint64_t index = (data.Q << 2) | (data.S << 1) | ((data.size >> 1) & 1);
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 16, data.Rn, data.Rm);  // 2 byte access, post-increment by Xm
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7174,8 +7174,8 @@
+   // index = Q:S (2 bits, 0-3)
+   uint64_t index = (data.Q << 1) | data.S;
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 32, data.Rn, 4);  // 4 byte access, post-increment by 4
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7184,8 +7184,8 @@
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+   uint64_t index = (data.Q << 1) | data.S;
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 32, data.Rn, data.Rm);  // 4 byte access, post-increment by Xm
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7195,8 +7195,8 @@
+   // index = Q (1 bit, 0-1)
+   uint64_t index = data.Q;
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 64, data.Rn, 8);  // 8 byte access, post-increment by 8
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 
+@@ -7205,8 +7205,8 @@
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+   uint64_t index = data.Q;
+   AddRegOperand(inst, kActionReadWrite, kRegV, kUseAsValue, data.Rt);
+-  AddImmOperand(inst, index, kUnsigned, 32);
+   AddPostIndexMemOp(inst, 64, data.Rn, data.Rm);  // 8 byte access, post-increment by Xm
++  AddImmOperand(inst, index, kUnsigned, 32);
+   return true;
+ }
+ 

@@ -1,0 +1,69 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..8bda1aa 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -1036,6 +1036,23 @@ bool TryDecodeSTLR_SL64_LDSTEXCL(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// STLRB  <Wt>, [<Xn|SP>{,#0}]  (store-release byte; mirrors STLR_SL32, byte width
++// comes from the semantics operand type M8W in DATAXFER.cpp).
++bool TryDecodeSTLRB_SL32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 32, data.Rn, 0);
++  return true;
++}
++
++// STLRH  <Wt>, [<Xn|SP>{,#0}]  (store-release halfword; width from M16W).
++bool TryDecodeSTLRH_SL32_LDSTEXCL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 32, data.Rn, 0);
++  return true;
++}
++
+ // STP  <Wt1>, <Wt2>, [<Xn|SP>, #<imm>]!
+ bool TryDecodeSTP_32_LDSTPAIR_PRE(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..b8ce73e 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -18351,10 +18351,7 @@ bool TryDecodeSWPLH_32_MEMOP(const InstData &, Instruction &) {
+ //  29 0
+ //  30 1 size     0
+ //  31 0 size     1
+-// STLRH  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeSTLRH_SL32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// STLRH  <Wt>, [<Xn|SP>{,#0}]  -- implemented in Arch.cpp (store-release halfword)
+ 
+ // LDUMAXA LDUMAXA_32_memop:
+ //   0 x Rt       0
+@@ -27192,10 +27189,7 @@ bool TryDecodeLDXRH_LR32_LDSTEXCL(const InstData &, Instruction &) {
+ //  29 0
+ //  30 0 size     0
+ //  31 0 size     1
+-// STLRB  <Wt>, [<Xn|SP>{,#0}]
+-bool TryDecodeSTLRB_SL32_LDSTEXCL(const InstData &, Instruction &) {
+-  return false;
+-}
++// STLRB  <Wt>, [<Xn|SP>{,#0}]  -- implemented in Arch.cpp (store-release byte)
+ 
+ // ST3 ST3_asisdlse_R3:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index 6650856..8f7d3ca 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -224,6 +224,8 @@ DEF_ISEL(STR_64_LDST_POS) = Store<R64, M64W>;  // STR  <Xt>, [<Xn|SP>{, #<pimm>}
+ 
+ DEF_ISEL(STLR_SL32_LDSTEXCL) = StoreRelease<R32, M32W>;  // STLR  <Wt>, [<Xn|SP>{,#0}]
+ DEF_ISEL(STLR_SL64_LDSTEXCL) = StoreRelease<R64, M64W>;  // STLR  <Xt>, [<Xn|SP>{,#0}]
++DEF_ISEL(STLRB_SL32_LDSTEXCL) = StoreRelease<R32, M8W>;  // STLRB  <Wt>, [<Xn|SP>{,#0}]
++DEF_ISEL(STLRH_SL32_LDSTEXCL) = StoreRelease<R32, M16W>;  // STLRH  <Wt>, [<Xn|SP>{,#0}]
+ 
+ DEF_ISEL(STRB_32_LDST_POS) = Store<R32, M8W>;  // STRB  <Wt>, [<Xn|SP>{, #<pimm>}]
+ DEF_ISEL(STRB_32_LDST_IMMPOST) = StoreUpdateIndex<R32, M8W>;  // STRB  <Wt>, [<Xn|SP>], #<simm>

@@ -1,0 +1,71 @@
+raptormark
+Copyright 2026 The raptormark Authors
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file in this
+directory for the terms.
+
+This product includes software developed by third parties, as set out below.
+None of the projects named here ship a NOTICE file of their own, so nothing in
+this file is a verbatim carry-forward; it is attribution written for raptormark.
+
+
+-------------------------------------------------------------------------------
+elfconv -- https://github.com/yomaytk/elfconv
+Licensed under the Apache License, Version 2.0.
+
+raptormark drives elfconv's `elflift` to lift aarch64 ELF into LLVM IR. The
+upstream project is pinned as a submodule at `third_party/elfconv`, and
+raptormark's fork of it lives as an ordered patch series under `patches/`,
+applied when the builder image is built. Code derived from elfconv is present
+in every WebAssembly module raptormark emits.
+
+elfconv in turn incorporates:
+
+  Remill -- https://github.com/lifting-bits/remill
+  Licensed under the Apache License, Version 2.0.
+  Vendored and modified by elfconv under `backend/remill`. Remill's runtime
+  intrinsics are linked into the emitted module.
+
+  MyAOT -- https://github.com/AkihiroSuda/myaot
+  Licensed under the Apache License, Version 2.0.
+  elfconv began as its successor project.
+
+
+-------------------------------------------------------------------------------
+LLVM -- https://llvm.org
+Licensed under the Apache License, Version 2.0, with LLVM Exceptions.
+
+Used as the compiler and linker backend inside the builder image.
+
+
+-------------------------------------------------------------------------------
+Go module dependencies are declared in `go.mod`. `github.com/alecthomas/kong`
+and its transitive dependencies are MIT-licensed; those terms travel with their
+own source and are not restated here.
+
+Rust crate dependencies of the ecvisor runtime are declared in
+`runtime/Cargo.toml`, and likewise carry their own terms.
+
+
+===============================================================================
+SCOPE NOTES -- these are not attributions
+===============================================================================
+
+`tools/decode-oracle/` is NOT covered by the Apache License above.
+
+It is a separate Go module licensed LGPL-2.1-or-later, because it embeds QEMU's
+decodetree tables. It is a developer-only analysis tool: it is never built into,
+linked with, or shipped alongside the raptormark pipeline, and `go build ./...`
+in this module does not descend into it -- there is no `go.work`, and nothing
+in the root module imports it. Keeping it separate is what leaves this project
+free to be Apache-2.0. See `tools/decode-oracle/README.md`.
+
+
+Output of the pipeline carries licences this file says nothing about.
+
+A module produced by raptormark contains code translated from whatever
+container image was supplied as input, together with the ecvisor runtime. The
+translated guest contents keep their own licences -- commonly glibc or musl,
+among others -- and those terms are unaffected by this NOTICE. Anyone
+distributing a translated module is responsible for the licences of the guest
+image it was built from.

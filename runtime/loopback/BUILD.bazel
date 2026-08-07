@@ -1,0 +1,16 @@
+# ecvisor with `net-loopback`: no host imports at all, an in-process network.
+#
+# It exists to make a property CHECKABLE rather than argued. ecvisor is linked
+# into every module whole, so the default build demands WasmEdge's eleven
+# non-standard socket imports even from a guest that never opens a socket --
+# which is why `containerd-shim-wasmtime` can load a raptormark module but not
+# run it. The backend seam (runtime/src/net) is supposed to remove them by
+# compile-time exclusion; linking against THIS archive is what proves it did,
+# because no amount of reasoning about `dyn` substitutes for reading the import
+# section of a real module.
+#
+# Also what `cargo test` gets.
+
+load("//bazel:ecvisor.bzl", "ecvisor_profile")
+
+ecvisor_profile(feature = "net-loopback")

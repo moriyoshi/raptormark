@@ -1,0 +1,44 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -62,7 +62,7 @@
+ // Where the other ~95% goes. decode+emit are 4.1-4.5% of a lift, so the cost is
+ // the machinery around them; these account for the per-trace passes that walk
+ // every block, and for the per-block bookkeeping the disabled VRO path consumes.
+-static uint64_t ecv_indirect_ns = 0, ecv_fork_ns = 0;
++static uint64_t ecv_indirect_ns = 0, ecv_fork_ns = 0, ecv_indirect_count = 0;
+ // The instruction work-list loop in full: splits the unaccounted ~95% into
+ // per-instruction machinery (inside) and per-trace machinery (outside).
+ static uint64_t ecv_instloop_ns = 0;
+@@ -96,11 +96,11 @@
+     if (getenv("ECV_DECODE_STATS")) {
+       fprintf(stderr,
+               "[ecv] insns %llu  decode %.3fs  emit %.3fs  indirectbr %.3fs  fork %.3fs  "
+-              "bbreg %llu/%.3fs  vropt %llu/%.3fs  instloop %.3fs\n",
++              "bbreg %llu/%.3fs  vropt %llu/%.3fs  instloop %.3fs  indbr_calls %llu\n",
+               (unsigned long long) ecv_insn_count, ecv_decode_ns / 1e9, ecv_emit_ns / 1e9,
+               ecv_indirect_ns / 1e9, ecv_fork_ns / 1e9, (unsigned long long) ecv_bbreg_count,
+               ecv_bbreg_ns / 1e9, (unsigned long long) ecv_vropt_count, ecv_vropt_ns / 1e9,
+-              ecv_instloop_ns / 1e9);
++              ecv_instloop_ns / 1e9, (unsigned long long) ecv_indirect_count);
+       fflush(stderr);
+     }
+   }
+@@ -1287,6 +1287,17 @@
+ }
+ 
+ void TraceLifter::Impl::GenIndirectJumpCode(uint64_t trace_addr) {
++  // Timed at the DEFINITION, not at a call site: the earlier call-site timer read
++  // exactly 0.000s because the live caller is in ForkEmulation.cpp, not here.
++  struct EcvIndScope {
++    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
++    ~EcvIndScope() {
++      ecv_indirect_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                             std::chrono::steady_clock::now() - t0)
++                             .count();
++      ecv_indirect_count++;
++    }
++  } ecv_ind_scope;
+ 
+   auto u64ty = llvm::Type::getInt64Ty(context);
+   auto u64ptrty = llvm::Type::getInt64PtrTy(context);

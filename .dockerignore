@@ -1,0 +1,18 @@
+# ⚠️ NO LONGER USED BY builder/Dockerfile, and kept only so a stray root-context
+# build does not ship the repo.
+#
+# It used to matter: the builder image was built with the REPO ROOT as its
+# context, and this trimmed that to builder/ and runtime/ so ~500 MB of
+# third_party/elfconv did not cross the wire.
+#
+# Since 2026-08-23 the context is `builder/_stage` — the ~20 MB tree
+# //builder:stage produces, which is exactly the files the image gains and
+# nothing else. A context that IS the payload needs no ignore file.
+#
+# `raptormark build-image` passes that directory explicitly. If you find
+# yourself running `docker build -f builder/Dockerfile .` by hand, that is the
+# mistake this file now guards: the Dockerfile is `COPY . /`, so a root context
+# would copy the repository into the image.
+*
+!builder
+!runtime

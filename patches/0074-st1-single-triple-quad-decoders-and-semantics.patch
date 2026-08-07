@@ -1,0 +1,255 @@
+ST1 with 1 (post-index), 3 and 4 registers -- decoders and semantics.
+
+Completes the LD1/ST1 "multiple structures" family alongside 0072 and 0073.
+
+These five forms differed from the LD1 gaps in an important way: they had NO
+`DEF_ISEL` *and* no real decoder. `Decode.cpp` carried
+
+    bool TryDecodeST1_ASISDLSE_R3_3V(const InstData &, Instruction &) {
+      return false;
+    }
+
+so the decoder REFUSED, and the instruction was fatal (`undecoded instruction`)
+rather than a silent no-op. That is the better failure of the two, and it is why
+these were lower priority than 0072 even though there are more of them.
+
+Measured encodings that reached the fatal path:
+  0x4c9f7314  st1 {v20.16b}, [x24], #16
+  0x4c00600a  st1 {v10.16b-v12.16b}, [x0]
+  0x4c9f62aa  st1 {v10.16b-v12.16b}, [x21], #48
+
+The stubs are removed from Decode.cpp and real decoders added to Arch.cpp, which
+is the convention the already-working forms follow -- `TryDecodeST1_ASISDLSE_
+R2_2V` has no stub in Decode.cpp and is defined in Arch.cpp. They delegate:
+`TryDecodeSTn` reads the register count out of the opcode, so 3- and 4-register
+differ from 1-register only in that count, exactly as the LD1 side already does.
+
+⚠️ Stores need no multi-value return, so no `TTriple`/`TQuad` is involved here.
+The sources arrive as ordinary operands and the semantics are `DEF_SEM_VOID_RUN`.
+The post-index variants delegate to the non-post-index ones for the same reason
+as in 0072/0073: `AddPostIndexMemOp` carries the base-register update and the
+lifter applies it after the call.
+
+After this patch every LD1 and ST1 multiple-structures form is implemented. The
+`*_ASISDLSEP_R*_R*` register-post-index family (`[Xn], Xm`) remains unhandled;
+it also fails loudly, and nothing in the fixtures has been observed to use it.
+
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -3766,9 +3766,8 @@
+ //  30 x Q        0
+ //  31 0
+ // ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>]
+-bool TryDecodeST1_ASISDLSE_R3_3V(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST1_ASISDLSE_R3_3V is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // ST1 ST1_asisdlse_R4_4v:
+ //   0 x Rt       0
+@@ -3804,9 +3803,8 @@
+ //  30 x Q        0
+ //  31 0
+ // ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>]
+-bool TryDecodeST1_ASISDLSE_R4_4V(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST1_ASISDLSE_R4_4V is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // ST1 ST1_asisdlsep_I1_i1:
+ //   0 x Rt       0
+@@ -3842,9 +3840,8 @@
+ //  30 x Q        0
+ //  31 0
+ // ST1  { <Vt>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeST1_ASISDLSEP_I1_I1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST1_ASISDLSEP_I1_I1 is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // ST1 ST1_asisdlsep_R1_r1:
+ //   0 x Rt       0
+@@ -3956,9 +3953,8 @@
+ //  30 x Q        0
+ //  31 0
+ // ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeST1_ASISDLSEP_I3_I3(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST1_ASISDLSEP_I3_I3 is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // ST1 ST1_asisdlsep_R3_r3:
+ //   0 x Rt       0
+@@ -4032,9 +4028,8 @@
+ //  30 x Q        0
+ //  31 0
+ // ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeST1_ASISDLSEP_I4_I4(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST1_ASISDLSEP_I4_I4 is implemented in Arch.cpp; the `return false` stub that
++// stood here made the instruction UNDECODED and therefore fatal.
+ 
+ // ST1 ST1_asisdlsep_R4_r4:
+ //   0 x Rt       0
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -6055,6 +6055,40 @@
+   return TryDecodeST1_ASISDLSE_R1_1V(data, inst);
+ }
+ 
++// ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>]
++//
++// `TryDecodeSTn` reads the register count out of the opcode field, so the 3-
++// and 4-register forms differ from the 2-register one only in that count and
++// can share its decoder -- exactly as the LD1 side already does.
++bool TryDecodeST1_ASISDLSE_R3_3V(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  return TryDecodeST1_ASISDLSE_R1_1V(data, inst);
++}
++
++// ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>]
++bool TryDecodeST1_ASISDLSE_R4_4V(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  return TryDecodeST1_ASISDLSE_R1_1V(data, inst);
++}
++
++// ST1  { <Vt>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeST1_ASISDLSEP_I1_I1(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  return TryDecodeST1_ASISDLSEP_I2_I2(data, inst);
++}
++
++// ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeST1_ASISDLSEP_I3_I3(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  return TryDecodeST1_ASISDLSEP_I2_I2(data, inst);
++}
++
++// ST1  { <Vt>.<T>, <Vt2>.<T>, <Vt3>.<T>, <Vt4>.<T> }, [<Xn|SP>], <imm>
++bool TryDecodeST1_ASISDLSEP_I4_I4(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  return TryDecodeST1_ASISDLSEP_I2_I2(data, inst);
++}
++
+ // ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]  -- de-interleaving store, no offset.
+ // TryDecodeSTn reads selem=2 from the opcode and adds the two source registers
+ // with the arrangement suffix; identical structure to ST1's decoder.
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1367,6 +1367,111 @@
+ DEF_ISEL(ST1_ASISDLSEP_I2_I2_2D) =
+     ST1_PAIR_POSTINDEX_128<MVI128>;  // ST1  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
+ 
++// ST1 with 1 (post-index), 3 and 4 source registers.
++//
++// These had NO `DEF_ISEL` *and* no real `TryDecode*` -- Decode.cpp carried
++// `return false` stubs -- so unlike the LD1 gaps they failed LOUDLY, as
++// `undecoded instruction`. Measured encodings: `0x4c9f7314`
++// (`st1 {v.16b},[x],#16`), `0x4c00600a` (`st1 {v-v-v},[x]`) and `0x4c9f62aa`
++// (`st1 {v-v-v},[x],#48`).
++//
++// Stores need no multi-value return, so no `TTriple`/`TQuad` here: the sources
++// arrive as ordinary operands and the semantics is a void run.
++namespace {
++
++#define MAKE_ST1_MULTI(elem_size) \
++  template <typename D> \
++  DEF_SEM_VOID_RUN(ST1_TRIPLE_##elem_size, VIu##elem_size##v1 src1, VIu##elem_size##v1 src2, \
++                   VIu##elem_size##v1 src3, D dst) { \
++    UWriteMVI##elem_size(rt_m, arena_ptr, dst, UReadVI##elem_size(src1)); \
++    UWriteMVI##elem_size(rt_m, arena_ptr, GetElementPtr(dst, 1U), UReadVI##elem_size(src2)); \
++    UWriteMVI##elem_size(rt_m, arena_ptr, GetElementPtr(dst, 2U), UReadVI##elem_size(src3)); \
++  } \
++  template <typename D> \
++  DEF_SEM_VOID_RUN(ST1_QUAD_##elem_size, VIu##elem_size##v1 src1, VIu##elem_size##v1 src2, \
++                   VIu##elem_size##v1 src3, VIu##elem_size##v1 src4, D dst) { \
++    UWriteMVI##elem_size(rt_m, arena_ptr, dst, UReadVI##elem_size(src1)); \
++    UWriteMVI##elem_size(rt_m, arena_ptr, GetElementPtr(dst, 1U), UReadVI##elem_size(src2)); \
++    UWriteMVI##elem_size(rt_m, arena_ptr, GetElementPtr(dst, 2U), UReadVI##elem_size(src3)); \
++    UWriteMVI##elem_size(rt_m, arena_ptr, GetElementPtr(dst, 3U), UReadVI##elem_size(src4)); \
++  }
++
++MAKE_ST1_MULTI(64)
++MAKE_ST1_MULTI(128)
++
++#undef MAKE_ST1_MULTI
++
++// Post-index delegates, as the pair forms do: `AddPostIndexMemOp` carries the
++// base-register update and the lifter applies it after the call.
++#define MAKE_ST1_MULTI_POSTINDEX(elem_size) \
++  template <typename D> \
++  DEF_SEM_VOID_RUN(ST1_SINGLE_POSTINDEX_##elem_size, VIu##elem_size##v1 src1, D dst) { \
++    ST1_SINGLE_##elem_size(arena_ptr, rt_m, src1, dst); \
++  } \
++  template <typename D> \
++  DEF_SEM_VOID_RUN(ST1_TRIPLE_POSTINDEX_##elem_size, VIu##elem_size##v1 src1, \
++                   VIu##elem_size##v1 src2, VIu##elem_size##v1 src3, D dst) { \
++    ST1_TRIPLE_##elem_size(arena_ptr, rt_m, src1, src2, src3, dst); \
++  } \
++  template <typename D> \
++  DEF_SEM_VOID_RUN(ST1_QUAD_POSTINDEX_##elem_size, VIu##elem_size##v1 src1, \
++                   VIu##elem_size##v1 src2, VIu##elem_size##v1 src3, VIu##elem_size##v1 src4, \
++                   D dst) { \
++    ST1_QUAD_##elem_size(arena_ptr, rt_m, src1, src2, src3, src4, dst); \
++  }
++
++MAKE_ST1_MULTI_POSTINDEX(64)
++MAKE_ST1_MULTI_POSTINDEX(128)
++
++#undef MAKE_ST1_MULTI_POSTINDEX
++
++}  // namespace
++
++DEF_ISEL(ST1_ASISDLSE_R3_3V_8B) = ST1_TRIPLE_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_16B) = ST1_TRIPLE_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_4H) = ST1_TRIPLE_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_8H) = ST1_TRIPLE_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_2S) = ST1_TRIPLE_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_4S) = ST1_TRIPLE_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_1D) = ST1_TRIPLE_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R3_3V_2D) = ST1_TRIPLE_128<MVI128>;
++
++DEF_ISEL(ST1_ASISDLSE_R4_4V_8B) = ST1_QUAD_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_16B) = ST1_QUAD_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_4H) = ST1_QUAD_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_8H) = ST1_QUAD_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_2S) = ST1_QUAD_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_4S) = ST1_QUAD_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_1D) = ST1_QUAD_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSE_R4_4V_2D) = ST1_QUAD_128<MVI128>;
++
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_8B) = ST1_SINGLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_16B) = ST1_SINGLE_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_4H) = ST1_SINGLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_8H) = ST1_SINGLE_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_2S) = ST1_SINGLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_4S) = ST1_SINGLE_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_1D) = ST1_SINGLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I1_I1_2D) = ST1_SINGLE_POSTINDEX_128<MVI128>;
++
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_8B) = ST1_TRIPLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_16B) = ST1_TRIPLE_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_4H) = ST1_TRIPLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_8H) = ST1_TRIPLE_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_2S) = ST1_TRIPLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_4S) = ST1_TRIPLE_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_1D) = ST1_TRIPLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I3_I3_2D) = ST1_TRIPLE_POSTINDEX_128<MVI128>;
++
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_8B) = ST1_QUAD_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_16B) = ST1_QUAD_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_4H) = ST1_QUAD_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_8H) = ST1_QUAD_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_2S) = ST1_QUAD_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_4S) = ST1_QUAD_POSTINDEX_128<MVI128>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_1D) = ST1_QUAD_POSTINDEX_64<MVI64>;
++DEF_ISEL(ST1_ASISDLSEP_I4_I4_2D) = ST1_QUAD_POSTINDEX_128<MVI128>;
++
+ // ST2 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]{, <imm>}  -- store two registers with
+ // element de-interleaving: mem[2*i] = src1.elem[i], mem[2*i+1] = src2.elem[i].
+ // Built as two register-width output vectors (out0 = interleaved stream[0..n),

@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>raptormark: a server in a tab</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; max-width: 60rem; }
+  #out { white-space: pre-wrap; background: #111; color: #eee; padding: 1rem;
+         border-radius: 6px; min-height: 8rem; overflow-x: auto; }
+  iframe { width: 100%; height: 10rem; border: 1px solid #888; border-radius: 6px;
+           margin-top: 1rem; background: #fff; }
+  .meta { color: #666; }
+</style>
+
+<h1>raptormark: a server in a tab</h1>
+<p class="meta">
+  An aarch64 HTTP server, translated ahead of time to WebAssembly, listening on a
+  socket inside this page. The iframe below is served by it: a service worker
+  intercepts <code>/_guest/</code>, hands the request bytes to the guest's
+  listening socket, and returns what the guest writes back. Nothing touches the
+  network.
+</p>
+<p class="meta" id="status">idle</p>
+<div id="out"></div>
+<iframe id="frame" title="served by the guest"></iframe>
+
+<script type="module">
+  import { installGuestServiceWorker, serveGuestInBrowser } from './dist/raptormark.js';
+
+  const out = document.getElementById('out');
+  const status = document.getElementById('status');
+  const frame = document.getElementById('frame');
+  const q = new URLSearchParams(location.search);
+
+  let buf = '';
+  let scheduled = false;
+  function emit(text) {
+    buf += text;
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      out.textContent += buf;
+      buf = '';
+      scheduled = false;
+    });
+  }
+
+  // `window.__ready` is what a browser test waits on. It is NOT "the guest
+  // booted": it means the guest is listening AND the worker controls this page,
+  // which are the two conditions a request needs.
+  window.__ready = false;
+  window.__error = undefined;
+
+  // `?env=K=V`, repeatable. Diagnosing a real server means reaching ecvisor's
+  // own tracing (RAPTORMARK_ECV_TRACE and friends), and there is otherwise no
+  // way to set an environment variable for a guest running in a tab.
+  const env = {};
+  for (const e of q.getAll('env')) {
+    const i = e.indexOf('=');
+    if (i > 0) env[e.slice(0, i)] = e.slice(i + 1);
+  }
+
+  try {
+    status.textContent = 'loading module...';
+    const server = await serveGuestInBrowser({
+      moduleUrl: q.get('module') ?? './public/httpd.wasm',
+      rootfsUrl: q.get('rootfs') ?? undefined,
+      version: q.get('v') ?? undefined,
+      port: Number(q.get('port') ?? '8080'),
+      // With a relay the guest can DIAL as well as serve; without one the
+      // composite refuses `connect` explicitly.
+      relayUrl: q.get('relay') ?? undefined,
+      args: q.getAll('arg').length ? q.getAll('arg') : undefined,
+      env,
+      onOutput: (fd, text) => emit(text),
+      onProgress: (got, total) => {
+        status.textContent = total
+          ? `downloading ${(got / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`
+          : `downloading ${(got / 1e6).toFixed(1)} MB`;
+      },
+    });
+
+    server.exited.then((code) => {
+      // A server that exits is a failure, and it would otherwise show up only as
+      // requests that mysteriously start timing out.
+      emit(`\n[host] the guest EXITED with ${code}; it should have kept serving\n`);
+      window.__error = `guest exited with ${code}`;
+    });
+
+    status.textContent = 'registering the service worker...';
+    await installGuestServiceWorker(server, {
+      onError: (e) => emit(`[host] request failed: ${e}\n`),
+    });
+
+    // Exposed for tests and for a human poking at the page: a guest in a tab
+    // has no outside process that could signal it.
+    window.__signal = (pid, sig) => server.signal(pid, sig);
+
+    status.textContent = `serving on /_guest/ from a guest listening on :${server.port}`;
+    window.__ready = true;
+    frame.src = q.get('src') ?? '/_guest/index.html';
+  } catch (err) {
+    status.textContent = `failed: ${err}`;
+    emit(`\n[host] ${err?.stack ?? err}\n`);
+    window.__error = String(err);
+  }
+</script>

@@ -1,0 +1,67 @@
+[package]
+name = "ecvisor"
+version = "0.1.0"
+edition = "2021"
+description = "raptormark supervisor runtime for elfconv-lifted programs (wasm32-wasip1)"
+
+[lib]
+# staticlib for the wasm link; rlib so `cargo test` can build the host-side
+# unit tests for the pure modules (vfs, boot).
+crate-type = ["staticlib", "rlib"]
+
+# Which network backend gets compiled in. EXACTLY ONE, and it must be selected
+# at compile time rather than at run time: wasm-ld emits an import for every
+# undefined symbol reachable from live code, so a `dyn` trait object or an enum
+# with a match would keep BOTH backends live and put both import sets in the
+# module. See `src/net/mod.rs`.
+#
+# The default reproduces today's shipping build exactly, so the standard gate
+# commands keep meaning what they have always meant. A browser or loopback
+# build is `--no-default-features --features <name>`.
+[features]
+default = ["net-wasmedge"]
+# WasmEdge's non-standard preview1 socket extension (the server profile).
+net-wasmedge = []
+# No host imports at all: an in-process network. Also what `cargo test` gets.
+net-loopback = []
+# The browser: a purpose-built `raptormark_net_v1` import module whose `wait`
+# never blocks, because a browser host cannot be blocked.
+net-browser = []
+# wasmer's WASIX sockets, from the `wasix_32v1` namespace. The only backend
+# other than wasmedge with external egress, and the only one that can express
+# TCP_NODELAY. ⚠️ Needs `wasmer run --net`; without it a socket opens and
+# refuses to bind. See `.agents/docs/WASIX_ABI.md`, which was measured.
+net-wasix = []
+
+# Which LOADER backend gets compiled in -- how a dlopen'd or exec'd unit's wasm
+# code becomes reachable. EXACTLY ONE, and unlike the network backends above the
+# mutual exclusion is a `compile_error!` rather than cfg precedence: these differ
+# in whether the module carries a host IMPORT, so a silent pick would decide at
+# deploy time whether a stock runwasi shim can instantiate the artifact.
+#
+# The default is `preloaded` by ABSENCE rather than by being listed in
+# `default`: it must also be what a non-wasm `cargo test` build gets, and a
+# default feature cannot express that.
+#
+# Ask the host to place a side module mid-run (adds `env.ecv_host_load_side`).
+# Serves an Emscripten-shaped host too -- Phase 0b measured our side modules
+# importing exactly 20 `env` names and no `GOT.*`, so conformance is naming.
+load-hosted = []
+load-wasix = []
+# Every unit already linked in; only the merge is deferred. No import. Listing
+# it explicitly is what lets the `compile_error!` above catch "both on".
+load-preloaded = []
+
+[dependencies]
+# Pure-Rust DEFLATE inflate for the rfs sidecar reader; no C, compiles to
+# wasm32-wasip1. The only dependency — fetched at builder-image build time
+# (Cargo.lock is committed for reproducibility). Diagnostics are hand-rolled in
+# `src/trace.rs`; see its module docs for why the `tracing` crate was tried and
+# dropped.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

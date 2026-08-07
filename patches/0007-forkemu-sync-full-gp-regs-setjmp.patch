@@ -1,0 +1,90 @@
+diff --git a/backend/remill/include/remill/BC/InstructionLifter.h b/backend/remill/include/remill/BC/InstructionLifter.h
+index c78fa73..da0cfca 100644
+--- a/backend/remill/include/remill/BC/InstructionLifter.h
++++ b/backend/remill/include/remill/BC/InstructionLifter.h
+@@ -206,6 +206,7 @@ class EcvReg {
+   std::string GetWideRegName() const;
+   bool CheckPassedArgsRegs() const;
+   bool CheckPassedReturnRegs() const;
++  bool CheckStoreBeforeCall() const;
+ 
+   class Hash {
+    public:
+diff --git a/backend/remill/lib/BC/VroInstructionLifter.cpp b/backend/remill/lib/BC/VroInstructionLifter.cpp
+index 8e01c4e..3f4e48f 100644
+--- a/backend/remill/lib/BC/VroInstructionLifter.cpp
++++ b/backend/remill/lib/BC/VroInstructionLifter.cpp
+@@ -386,6 +386,21 @@ bool EcvReg::CheckPassedReturnRegs() const {
+   return (0 <= number && number <= 1) || SP_ORDER == number;
+ }
+ 
++bool EcvReg::CheckStoreBeforeCall() const {
++  // Every register a callee could read from the caller's live state through the
++  // global State struct: all GP regs x0..x30, SP, and the callee-saved FP regs
++  // v8..v15. Broader than CheckPassedArgsRegs (args only) specifically so glibc's
++  // hand-written setjmp -- which snapshots the caller's callee-saved x19..x28,
++  // x29(fp), x30(lr), sp and v8..v15 into the jmp_buf -- captures correct values
++  // rather than stale globals. Extra stores for a normal callee are harmless
++  // (global just tracks local).
++  switch (reg_kind) {
++    case RegKind::General: return number <= 30 || SP_ORDER == number;
++    case RegKind::Vector: return 8 <= number && number <= 15;
++    default: return SP_ORDER == number;
++  }
++}
++
+ std::string ERC2str(ERC ecv_reg_class) {
+   switch (ecv_reg_class) {
+     case ERC::RegW: return "RegW"; break;
+diff --git a/backend/remill/lib/BC/VroTraceLifter.cpp b/backend/remill/lib/BC/VroTraceLifter.cpp
+index e695ed1..718e368 100644
+--- a/backend/remill/lib/BC/VroTraceLifter.cpp
++++ b/backend/remill/lib/BC/VroTraceLifter.cpp
+@@ -1186,7 +1186,7 @@ void VirtualRegsOpt::OptimizeVirtualRegsUsage() {
+             // priority: cur_r_inst_map > pre_str_rmp
+             std::set<EcvReg> strd;
+             for (auto [str_er1, cur_er1_valtpl] : cur_r_inst_mp) {
+-              if (str_er1.CheckPassedArgsRegs()) {
++              if (str_er1.CheckStoreBeforeCall()) {
+                 auto cur_erc1 = std::get<ERC>(cur_er1_valtpl);
+                 inst_lifter->StoreRegValueBeforeInst(
+                     t_bb, state_ptr, str_er1.GetRegName(cur_erc1),
+@@ -1198,7 +1198,7 @@ void VirtualRegsOpt::OptimizeVirtualRegsUsage() {
+             }
+             // Store `pre_str_map`
+             for (auto [str_er2, str_erc2] : t_bag->pres_str_rmp) {
+-              if (str_er2.CheckPassedArgsRegs() && !strd.contains(str_er2)) {
++              if (str_er2.CheckStoreBeforeCall() && !strd.contains(str_er2)) {
+                 inst_lifter->StoreRegValueBeforeInst(
+                     t_bb, state_ptr, str_er2.GetRegName(str_erc2),
+                     GetRegValueFromCacheMap(str_er2, ERC2WholeLLVMTy(str_er2), call_inst,
+@@ -1394,6 +1394,29 @@ void VirtualRegsOpt::OptimizeVirtualRegsUsage() {
+             t_inst = call_next_inst;
+             DEBUG_PC_AND_REGISTERS(call_next_inst, cur_r_inst_mp, 0xdeadbeef);
+           }
++          // Far indirect jump (`__remill_jump`, the L_far_jump terminator). The
++          // target-function reads its live-in registers from the global State, so
++          // sync the full callee-visible set (GP + SP + callee-saved FP) local->
++          // global before the jump. Required for siglongjmp: __longjmp restores
++          // x19..x28/x29/sp into LOCAL regs and then `br` reaches another function
++          // via __remill_jump; without this the resumed PG_TRY/PG_CATCH frame runs
++          // on stale globals (wrong SP / callee-saved -> corruption or a jump to
++          // a bogus address).
++          else if (call_inst->getCalledFunction() &&
++                   call_inst->getCalledFunction()->getName().str() == "__remill_jump") {
++            auto call_next_inst = call_inst->getNextNode();
++            for (auto [str_er, str_er_valtpl] : cur_r_inst_mp) {
++              if (str_er.CheckStoreBeforeCall()) {
++                auto cur_str_erc = std::get<ERC>(str_er_valtpl);
++                inst_lifter->StoreRegValueBeforeInst(
++                    t_bb, state_ptr, str_er.GetRegName(cur_str_erc),
++                    GetRegValueFromCacheMap(str_er, ERC2WholeLLVMTy(str_er), call_inst,
++                                            cur_r_inst_mp),
++                    call_inst);
++              }
++            }
++            t_inst = call_next_inst;
++          }
+           // Call the general semantic functions.
+           else {
+             auto call_next_inst = call_inst->getNextNode();

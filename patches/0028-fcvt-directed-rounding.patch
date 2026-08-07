@@ -1,0 +1,796 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -3654,6 +3654,325 @@
+   return true;
+ }
+ 
++// FCVT{N,P,M,A}{S,U}  <Wd|Xd>, <Sn|Dn> -- float to integer with an explicit
++// rounding mode. Only the round-toward-zero forms (FCVTZS/FCVTZU) were
++// implemented, because that is what an ordinary C cast compiles to; these are
++// what `ceil`, `floor`, `rint` and `round` compile to, so a program reaches them
++// only where it rounds deliberately. PostgreSQL does, in XLOGfileslop's
++// `ceil((double) distance / wal_segment_size)`, and died there mid-initdb.
++//
++// Operands are identical to the FCVTZ forms; only the semantic rounding differs.
++
++bool TryDecodeFCVTNS_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNS_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNS_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNS_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNU_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNU_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNU_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTNU_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPS_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPS_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPS_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPS_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPU_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPU_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPU_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTPU_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMS_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMS_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMS_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMS_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMU_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMU_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMU_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTMU_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAS_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAS_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAS_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAU_32S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAU_64S_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAU_32D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFCVTAU_64D_FLOAT2INT(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  return true;
++}
++
+ // FMOV  <Hd>, #<imm>
+ bool TryDecodeFMOV_H_FLOATIMM(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -1478,9 +1478,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTPS  <Wd>, <Sn>
+-bool TryDecodeFCVTPS_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPS_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTPS FCVTPS_64S_float2int:
+ //   0 x Rd       0
+@@ -1516,9 +1514,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTPS  <Xd>, <Sn>
+-bool TryDecodeFCVTPS_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPS_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTPS FCVTPS_32D_float2int:
+ //   0 x Rd       0
+@@ -1554,9 +1550,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTPS  <Wd>, <Dn>
+-bool TryDecodeFCVTPS_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPS_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTPS FCVTPS_64D_float2int:
+ //   0 x Rd       0
+@@ -1592,9 +1586,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTPS  <Xd>, <Dn>
+-bool TryDecodeFCVTPS_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPS_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FMINNM FMINNM_H_floatdp2:
+ //   0 x Rd       0
+@@ -17478,9 +17470,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTAU  <Wd>, <Sn>
+-bool TryDecodeFCVTAU_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAU_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTAU FCVTAU_64S_float2int:
+ //   0 x Rd       0
+@@ -17516,9 +17506,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTAU  <Xd>, <Sn>
+-bool TryDecodeFCVTAU_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAU_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTAU FCVTAU_32D_float2int:
+ //   0 x Rd       0
+@@ -17554,9 +17542,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTAU  <Wd>, <Dn>
+-bool TryDecodeFCVTAU_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAU_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTAU FCVTAU_64D_float2int:
+ //   0 x Rd       0
+@@ -17592,9 +17578,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTAU  <Xd>, <Dn>
+-bool TryDecodeFCVTAU_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAU_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // SYS TLBI_SYS_CR_system:
+ //   0 x Rt       0
+@@ -27839,9 +27823,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTAS  <Wd>, <Sn>
+-bool TryDecodeFCVTAS_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAS_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTAS FCVTAS_64S_float2int:
+ //   0 x Rd       0
+@@ -27877,9 +27859,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTAS  <Xd>, <Sn>
+-bool TryDecodeFCVTAS_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAS_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTAS FCVTAS_32D_float2int:
+ //   0 x Rd       0
+@@ -27915,9 +27895,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTAS  <Wd>, <Dn>
+-bool TryDecodeFCVTAS_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTAS_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // SSHLL SXTL_SSHLL_asimdshf_L:
+ //   0 x Rd       0
+@@ -28140,9 +28118,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTPU  <Wd>, <Sn>
+-bool TryDecodeFCVTPU_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPU_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTPU FCVTPU_64S_float2int:
+ //   0 x Rd       0
+@@ -28178,9 +28154,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTPU  <Xd>, <Sn>
+-bool TryDecodeFCVTPU_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPU_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTPU FCVTPU_32D_float2int:
+ //   0 x Rd       0
+@@ -28216,9 +28190,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTPU  <Wd>, <Dn>
+-bool TryDecodeFCVTPU_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPU_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTPU FCVTPU_64D_float2int:
+ //   0 x Rd       0
+@@ -28254,9 +28226,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTPU  <Xd>, <Dn>
+-bool TryDecodeFCVTPU_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTPU_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // STSETH STSETH_32S_memop:
+ //   0 1 Rt       0
+@@ -28482,9 +28452,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTMS  <Wd>, <Sn>
+-bool TryDecodeFCVTMS_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMS_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTMS FCVTMS_64S_float2int:
+ //   0 x Rd       0
+@@ -28520,9 +28488,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTMS  <Xd>, <Sn>
+-bool TryDecodeFCVTMS_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMS_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTMS FCVTMS_32D_float2int:
+ //   0 x Rd       0
+@@ -28558,9 +28524,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTMS  <Wd>, <Dn>
+-bool TryDecodeFCVTMS_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMS_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTMS FCVTMS_64D_float2int:
+ //   0 x Rd       0
+@@ -28596,9 +28560,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTMS  <Xd>, <Dn>
+-bool TryDecodeFCVTMS_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMS_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // STSMINH STSMINH_32S_memop:
+ //   0 1 Rt       0
+@@ -31672,9 +31634,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTMU  <Wd>, <Sn>
+-bool TryDecodeFCVTMU_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMU_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTMU FCVTMU_64S_float2int:
+ //   0 x Rd       0
+@@ -31710,9 +31670,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTMU  <Xd>, <Sn>
+-bool TryDecodeFCVTMU_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMU_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTMU FCVTMU_32D_float2int:
+ //   0 x Rd       0
+@@ -31748,9 +31706,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTMU  <Wd>, <Dn>
+-bool TryDecodeFCVTMU_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMU_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTMU FCVTMU_64D_float2int:
+ //   0 x Rd       0
+@@ -31786,9 +31742,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTMU  <Xd>, <Dn>
+-bool TryDecodeFCVTMU_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTMU_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTZU FCVTZU_64H_float2int:
+ //   0 x Rd       0
+@@ -35141,9 +35095,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTNS  <Wd>, <Sn>
+-bool TryDecodeFCVTNS_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNS_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTNS FCVTNS_64S_float2int:
+ //   0 x Rd       0
+@@ -35179,9 +35131,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTNS  <Xd>, <Sn>
+-bool TryDecodeFCVTNS_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNS_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTNS FCVTNS_32D_float2int:
+ //   0 x Rd       0
+@@ -35217,9 +35167,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTNS  <Wd>, <Dn>
+-bool TryDecodeFCVTNS_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNS_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTNS FCVTNS_64D_float2int:
+ //   0 x Rd       0
+@@ -35255,9 +35203,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTNS  <Xd>, <Dn>
+-bool TryDecodeFCVTNS_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNS_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // SQSHRN SQSHRN_asisdshf_N:
+ //   0 x Rd       0
+@@ -36731,9 +36677,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTNU  <Wd>, <Sn>
+-bool TryDecodeFCVTNU_32S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNU_32S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTNU FCVTNU_64S_float2int:
+ //   0 x Rd       0
+@@ -36769,9 +36713,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTNU  <Xd>, <Sn>
+-bool TryDecodeFCVTNU_64S_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNU_64S_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTNU FCVTNU_32D_float2int:
+ //   0 x Rd       0
+@@ -36807,9 +36749,7 @@
+ //  30 0
+ //  31 0 sf       0
+ // FCVTNU  <Wd>, <Dn>
+-bool TryDecodeFCVTNU_32D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNU_32D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // FCVTNU FCVTNU_64D_float2int:
+ //   0 x Rd       0
+@@ -36845,9 +36785,7 @@
+ //  30 0
+ //  31 1 sf       0
+ // FCVTNU  <Xd>, <Dn>
+-bool TryDecodeFCVTNU_64D_FLOAT2INT(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFCVTNU_64D_FLOAT2INT: implemented in Arch.cpp (directed-rounding FCVT).
+ 
+ // MUL MUL_asimdsame_only:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+--- a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+@@ -215,11 +215,14 @@
+ // FCVTAS  <Xd>, <Dn>
+ // (FIXME) not using rounding to nearest with ties to Away
+ DEF_SEM_U64_STATE(FCVTAS_Float64ToSInt64, RF64 src) {
+-  return CheckedCast<float64_t, int64_t>(state, Read(src));
++  // FCVTAS rounds to nearest with ties AWAY from zero. This applied no rounding
++  // at all, so it truncated exactly like FCVTZS and fcvtas(2.5) returned 2.
++  return CheckedCast<float64_t, int64_t>(state, std::round(Read(src)));
+ }
+ // FPSR
+ DEF_SEM_U64_STATE(FCVTAS_Float64ToSInt64_FPSRStatus, RF64 src) {
+-  return CheckedCastFPSRStatus<float64_t, int64_t>(state, Read(src));
++  // See FCVTAS_Float64ToSInt64: ties away from zero, not truncation.
++  return CheckedCastFPSRStatus<float64_t, int64_t>(state, std::round(Read(src)));
+ }
+ 
+ // FCVT  <Dd>, <Sn>
+@@ -318,6 +321,102 @@
+ DEF_ISEL(FCVTZS_64S_FLOAT2INT) = FCVTZS_Float32ToSInt64;  // FCVTZS  <Wd>, <Sn>
+ DEF_ISEL(FCVTZS_32D_FLOAT2INT) = FCVTZS_Float64ToSInt32;  // FCVTZS  <Wd>, <Dn>
+ DEF_ISEL(FCVTZS_64D_FLOAT2INT) = FCVTZS_Float64ToSInt64;  // FCVTZS  <Xd>, <Dn>
++
++// FCVT{N,P,M,A}{S,U}: convert float to integer, rounding as the mnemonic says,
++// then saturate exactly as the round-to-zero forms do -- `CheckedCast` is what
++// gives ARM's out-of-range and NaN behaviour, so the ONLY difference from
++// FCVTZ* is rounding the value first.
++//
++// The helpers are the ones patches 0004/0011 established for FRINT: wasm rounds
++// to nearest-even natively, so `std::nearbyint` under the default FE_TONEAREST
++// gives FCVTN's ties-to-even and `std::round` gives FCVTA's ties-away.
++
++// round to nearest, ties to even
++template <typename SB, typename S, typename DB>
++DEF_SEM_T_STATE(FCVTN_FloatToInt, S src) {
++  return CheckedCast<SB, DB>(state, std::nearbyint(Read(src)));
++}
++
++// round toward +infinity
++template <typename SB, typename S, typename DB>
++DEF_SEM_T_STATE(FCVTP_FloatToInt, S src) {
++  return CheckedCast<SB, DB>(state, std::ceil(Read(src)));
++}
++
++// round toward -infinity
++template <typename SB, typename S, typename DB>
++DEF_SEM_T_STATE(FCVTM_FloatToInt, S src) {
++  return CheckedCast<SB, DB>(state, std::floor(Read(src)));
++}
++
++// round to nearest, ties away from zero
++template <typename SB, typename S, typename DB>
++DEF_SEM_T_STATE(FCVTA_FloatToInt, S src) {
++  return CheckedCast<SB, DB>(state, std::round(Read(src)));
++}
++
++DEF_ISEL(FCVTNS_32S_FLOAT2INT) =
++    FCVTN_FloatToInt<RF32, float32_t, int32_t>;
++DEF_ISEL(FCVTNS_64S_FLOAT2INT) =
++    FCVTN_FloatToInt<RF32, float32_t, int64_t>;
++DEF_ISEL(FCVTNS_32D_FLOAT2INT) =
++    FCVTN_FloatToInt<RF64, float64_t, int32_t>;
++DEF_ISEL(FCVTNS_64D_FLOAT2INT) =
++    FCVTN_FloatToInt<RF64, float64_t, int64_t>;
++DEF_ISEL(FCVTNU_32S_FLOAT2INT) =
++    FCVTN_FloatToInt<RF32, float32_t, uint32_t>;
++DEF_ISEL(FCVTNU_64S_FLOAT2INT) =
++    FCVTN_FloatToInt<RF32, float32_t, uint64_t>;
++DEF_ISEL(FCVTNU_32D_FLOAT2INT) =
++    FCVTN_FloatToInt<RF64, float64_t, uint32_t>;
++DEF_ISEL(FCVTNU_64D_FLOAT2INT) =
++    FCVTN_FloatToInt<RF64, float64_t, uint64_t>;
++DEF_ISEL(FCVTPS_32S_FLOAT2INT) =
++    FCVTP_FloatToInt<RF32, float32_t, int32_t>;
++DEF_ISEL(FCVTPS_64S_FLOAT2INT) =
++    FCVTP_FloatToInt<RF32, float32_t, int64_t>;
++DEF_ISEL(FCVTPS_32D_FLOAT2INT) =
++    FCVTP_FloatToInt<RF64, float64_t, int32_t>;
++DEF_ISEL(FCVTPS_64D_FLOAT2INT) =
++    FCVTP_FloatToInt<RF64, float64_t, int64_t>;
++DEF_ISEL(FCVTPU_32S_FLOAT2INT) =
++    FCVTP_FloatToInt<RF32, float32_t, uint32_t>;
++DEF_ISEL(FCVTPU_64S_FLOAT2INT) =
++    FCVTP_FloatToInt<RF32, float32_t, uint64_t>;
++DEF_ISEL(FCVTPU_32D_FLOAT2INT) =
++    FCVTP_FloatToInt<RF64, float64_t, uint32_t>;
++DEF_ISEL(FCVTPU_64D_FLOAT2INT) =
++    FCVTP_FloatToInt<RF64, float64_t, uint64_t>;
++DEF_ISEL(FCVTMS_32S_FLOAT2INT) =
++    FCVTM_FloatToInt<RF32, float32_t, int32_t>;
++DEF_ISEL(FCVTMS_64S_FLOAT2INT) =
++    FCVTM_FloatToInt<RF32, float32_t, int64_t>;
++DEF_ISEL(FCVTMS_32D_FLOAT2INT) =
++    FCVTM_FloatToInt<RF64, float64_t, int32_t>;
++DEF_ISEL(FCVTMS_64D_FLOAT2INT) =
++    FCVTM_FloatToInt<RF64, float64_t, int64_t>;
++DEF_ISEL(FCVTMU_32S_FLOAT2INT) =
++    FCVTM_FloatToInt<RF32, float32_t, uint32_t>;
++DEF_ISEL(FCVTMU_64S_FLOAT2INT) =
++    FCVTM_FloatToInt<RF32, float32_t, uint64_t>;
++DEF_ISEL(FCVTMU_32D_FLOAT2INT) =
++    FCVTM_FloatToInt<RF64, float64_t, uint32_t>;
++DEF_ISEL(FCVTMU_64D_FLOAT2INT) =
++    FCVTM_FloatToInt<RF64, float64_t, uint64_t>;
++DEF_ISEL(FCVTAS_32S_FLOAT2INT) =
++    FCVTA_FloatToInt<RF32, float32_t, int32_t>;
++DEF_ISEL(FCVTAS_64S_FLOAT2INT) =
++    FCVTA_FloatToInt<RF32, float32_t, int64_t>;
++DEF_ISEL(FCVTAS_32D_FLOAT2INT) =
++    FCVTA_FloatToInt<RF64, float64_t, int32_t>;
++DEF_ISEL(FCVTAU_32S_FLOAT2INT) =
++    FCVTA_FloatToInt<RF32, float32_t, uint32_t>;
++DEF_ISEL(FCVTAU_64S_FLOAT2INT) =
++    FCVTA_FloatToInt<RF32, float32_t, uint64_t>;
++DEF_ISEL(FCVTAU_32D_FLOAT2INT) =
++    FCVTA_FloatToInt<RF64, float64_t, uint32_t>;
++DEF_ISEL(FCVTAU_64D_FLOAT2INT) =
++    FCVTA_FloatToInt<RF64, float64_t, uint64_t>;
+ // FPSR
+ DEF_ISEL(FCVTZS_32S_FLOAT2INT_FPSRSTATUS) =
+     FCVTZS_Float32ToSInt32_FPSRStatus;  // FCVTZS  <Wd>, <Sn>

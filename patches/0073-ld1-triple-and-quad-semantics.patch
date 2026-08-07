@@ -1,0 +1,183 @@
+LD1 with 3 and 4 destination registers -- restore the semantics.
+
+`LD1_ASISDLSE_R3_3V`, `R4_4V`, `LD1_ASISDLSEP_I3_I3` and `I4_I4` had no live
+`DEF_ISEL`. Their decoders exist and are correct, so each one DECODED and then
+lifted to nothing: a silent no-op that loaded not one of its three or four
+destination vectors. Measured 2026-09-01 -- every vector read back as zero, with
+no diagnostic of any kind (`RAPTORMARK_ECV_UNDEC_CENSUS=1` reports nothing,
+because the decoder never refused).
+
+❗ NO FRAMEWORK CHANGE WAS NEEDED, contrary to the first estimate. The lifter
+already handles an N-valued return generically -- `VroInstructionLifter` does
+
+    if (auto struct_ty = dyn_cast<StructType>(sema_inst->getType()))
+      CHECK(struct_ty->getNumElements() == write_regs.size());
+
+and then indexes the result once per destination register. `TPair` was not
+special-cased anywhere; it is just a two-field packed struct. So `TTriple` and
+`TQuad` beside it are the whole of the missing piece.
+
+Defined ONCE, outside the `#if defined(__x86_64__)` split that the pair forms
+live in. The x86 pair path returns an `_ecv_u<W>v2_t` VECTOR via
+reinterpret_cast, and there is no v3/v4 type to mirror that with; a plain struct
+is what the lifter wants in both arms anyway.
+
+The POST-INDEX variants delegate to the non-post-index ones. The base-register
+update is not the semantics' job -- `AddPostIndexMemOp` puts it on the memory
+operand and `VroInstructionLifter` applies it after the call, which its own
+comment gives the reason for ("If we update in the semantics function, we should
+increase the num of return variables and that will occur the returning through
+memory"). Performing it here would update the base register twice.
+
+Companion to 0072, which did the same for the 2-register post-index form. With
+both applied, every LD1 multiple-structures form is implemented. Still missing
+after this: five ST1 forms that have no `TryDecode*` at all, and the whole
+register-post-index (`[Xn], Xm`) family -- both of which fail LOUDLY rather than
+silently, so they cannot corrupt a result.
+
+--- a/backend/remill/include/remill/Arch/AArch64/Runtime/AArch64Definitions.h
++++ b/backend/remill/include/remill/Arch/AArch64/Runtime/AArch64Definitions.h
+@@ -25,6 +25,28 @@
+   T r2;
+ } __attribute__((packed));
+ 
++// Three and four destination registers, for `LD1 { Vt, Vt2, Vt3 }` and
++// `LD1 { Vt, Vt2, Vt3, Vt4 }`.
++//
++// The lifter already handles an N-element struct return generically --
++// `VroInstructionLifter` CHECKs `struct_ty->getNumElements() ==
++// write_regs.size()` and then indexes the result per destination -- so these
++// need no framework support beyond existing beside `TPair`.
++template <typename T>
++struct TTriple {
++  T r1;
++  T r2;
++  T r3;
++} __attribute__((packed));
++
++template <typename T>
++struct TQuad {
++  T r1;
++  T r2;
++  T r3;
++  T r4;
++} __attribute__((packed));
++
+ typedef struct {
+   uint64_t r1;
+   uint64_t r2;
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1196,6 +1196,112 @@
+ 
+ #endif
+ 
++// LD1 { Vt, Vt2, Vt3 } and { Vt, Vt2, Vt3, Vt4 }, with and without post-index.
++//
++// Defined ONCE, outside the `__x86_64__` split, because unlike the pair case
++// these return a plain struct (`TTriple`/`TQuad`) rather than an `_ecv_u*v2_t`
++// vector -- there is no v3/v4 vector type to mirror the x86 pair path with, and
++// a struct is what the lifter wants anyway: it CHECKs
++// `struct_ty->getNumElements() == write_regs.size()` and then indexes the
++// result once per destination register.
++//
++// As with the pair forms, the POST-INDEX variants delegate: the base-register
++// update rides on the memory operand added by `AddPostIndexMemOp`, and
++// `VroInstructionLifter` performs it after the call. Doing it here would write
++// the base register twice.
++//
++// Before this, all four were silent NO-OPS -- decoded, but with no live
++// `DEF_ISEL`, so they neither loaded a single vector nor advanced anything.
++namespace {
++
++#define MAKE_LD1_TRIPLE(elem_size) \
++  template <typename S> \
++  DEF_SEM_T_RUN(LD1_TRIPLE_##elem_size, S src) { \
++    auto e1 = UReadMVI##elem_size(rt_m, arena_ptr, src); \
++    auto e2 = UReadMVI##elem_size(rt_m, arena_ptr, GetElementPtr(src, 1U)); \
++    auto e3 = UReadMVI##elem_size(rt_m, arena_ptr, GetElementPtr(src, 2U)); \
++    return TTriple<decltype(e1)>{e1, e2, e3}; \
++  }
++
++MAKE_LD1_TRIPLE(8)
++MAKE_LD1_TRIPLE(16)
++MAKE_LD1_TRIPLE(32)
++MAKE_LD1_TRIPLE(64)
++
++#undef MAKE_LD1_TRIPLE
++
++#define MAKE_LD1_QUAD(elem_size) \
++  template <typename S> \
++  DEF_SEM_T_RUN(LD1_QUAD_##elem_size, S src) { \
++    auto e1 = UReadMVI##elem_size(rt_m, arena_ptr, src); \
++    auto e2 = UReadMVI##elem_size(rt_m, arena_ptr, GetElementPtr(src, 1U)); \
++    auto e3 = UReadMVI##elem_size(rt_m, arena_ptr, GetElementPtr(src, 2U)); \
++    auto e4 = UReadMVI##elem_size(rt_m, arena_ptr, GetElementPtr(src, 3U)); \
++    return TQuad<decltype(e1)>{e1, e2, e3, e4}; \
++  }
++
++MAKE_LD1_QUAD(8)
++MAKE_LD1_QUAD(16)
++MAKE_LD1_QUAD(32)
++MAKE_LD1_QUAD(64)
++
++#undef MAKE_LD1_QUAD
++
++#define MAKE_LD1_MULTI_POSTINDEX(kind, elem_size) \
++  template <typename S> \
++  DEF_SEM_T_RUN(LD1_##kind##_POSTINDEX_##elem_size, S src) { \
++    return LD1_##kind##_##elem_size(arena_ptr, rt_m, src); \
++  }
++
++MAKE_LD1_MULTI_POSTINDEX(TRIPLE, 8)
++MAKE_LD1_MULTI_POSTINDEX(TRIPLE, 16)
++MAKE_LD1_MULTI_POSTINDEX(TRIPLE, 32)
++MAKE_LD1_MULTI_POSTINDEX(TRIPLE, 64)
++MAKE_LD1_MULTI_POSTINDEX(QUAD, 8)
++MAKE_LD1_MULTI_POSTINDEX(QUAD, 16)
++MAKE_LD1_MULTI_POSTINDEX(QUAD, 32)
++MAKE_LD1_MULTI_POSTINDEX(QUAD, 64)
++
++#undef MAKE_LD1_MULTI_POSTINDEX
++
++}  // namespace
++
++DEF_ISEL(LD1_ASISDLSE_R3_3V_8B) = LD1_TRIPLE_8<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_16B) = LD1_TRIPLE_8<MVI128>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_4H) = LD1_TRIPLE_16<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_8H) = LD1_TRIPLE_16<MVI128>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_2S) = LD1_TRIPLE_32<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_4S) = LD1_TRIPLE_32<MVI128>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_1D) = LD1_TRIPLE_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R3_3V_2D) = LD1_TRIPLE_64<MVI128>;
++
++DEF_ISEL(LD1_ASISDLSE_R4_4V_8B) = LD1_QUAD_8<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_16B) = LD1_QUAD_8<MVI128>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_4H) = LD1_QUAD_16<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_8H) = LD1_QUAD_16<MVI128>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_2S) = LD1_QUAD_32<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_4S) = LD1_QUAD_32<MVI128>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_1D) = LD1_QUAD_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSE_R4_4V_2D) = LD1_QUAD_64<MVI128>;
++
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_8B) = LD1_TRIPLE_POSTINDEX_8<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_16B) = LD1_TRIPLE_POSTINDEX_8<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_4H) = LD1_TRIPLE_POSTINDEX_16<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_8H) = LD1_TRIPLE_POSTINDEX_16<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_2S) = LD1_TRIPLE_POSTINDEX_32<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_4S) = LD1_TRIPLE_POSTINDEX_32<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_1D) = LD1_TRIPLE_POSTINDEX_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I3_I3_2D) = LD1_TRIPLE_POSTINDEX_64<MVI128>;
++
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_8B) = LD1_QUAD_POSTINDEX_8<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_16B) = LD1_QUAD_POSTINDEX_8<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_4H) = LD1_QUAD_POSTINDEX_16<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_8H) = LD1_QUAD_POSTINDEX_16<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_2S) = LD1_QUAD_POSTINDEX_32<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_4S) = LD1_QUAD_POSTINDEX_32<MVI128>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_1D) = LD1_QUAD_POSTINDEX_64<MVI64>;
++DEF_ISEL(LD1_ASISDLSEP_I4_I4_2D) = LD1_QUAD_POSTINDEX_64<MVI128>;
++
+ namespace {
+ 
+ #define MAKE_ST1(elem_size) \

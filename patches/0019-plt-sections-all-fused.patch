@@ -1,0 +1,57 @@
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+index 6dab848..67b2b0c 100644
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -12,7 +12,10 @@
+ #include <bfd.h>
+ #include <cstdint>
+ #include <functional>
++#include <string>
++#include <utility>
+ #include <utils/Util.h>
++#include <vector>
+ 
+ void AArch64TraceManager::SetLiftedTraceDefinition(uint64_t addr, llvm::Function *lifted_func) {
+   traces[addr] = lifted_func;
+@@ -165,10 +168,37 @@ void AArch64TraceManager::SetELFData() {
+   }
+ 
+   // define functions in .plt section (FIXME)
+-  auto plt_section = elf_obj.code_sections[".plt"];
+-  if (plt_section.sec_name.empty())
+-    plt_section = elf_obj.code_sections[".iplt"];
+-  if (!plt_section.sec_name.empty()) {
++  //
++  // raptormark: scan EVERY PLT-shaped section, not just `.plt` / `.iplt`.
++  //
++  // PLT entries carry no symbols of their own, so this scan is the only thing
++  // that gives them function boundaries. A statically linked binary has at most
++  // one `.plt`, so looking the name up directly was enough. A fused image
++  // (internal/fuse) carries one PLT per merged object — `.plt.l0` … `.plt.lN`,
++  // tens of KB each — and none of those names matched, so none of them got
++  // boundaries. The first `bl` into one then produced a single synthetic
++  // function stretching from that stub to the next symbol in a *later* section,
++  // and disassembling that span ran off the end of the PLT into whatever
++  // followed. Decoding padding as instructions is where the nonsense branch
++  // targets came from ("rest_disasm_func at 0xfffffffffcde89ec lies outside
++  // every code section").
++  //
++  // Sorted by vma so the scan order does not depend on the unordered_map's
++  // iteration order.
++  std::vector<std::pair<uint64_t, std::string>> plt_sections;
++  for (auto &[sec_name, sec] : elf_obj.code_sections) {
++    if (sec.sec_name.empty()) {
++      continue;
++    }
++    if (sec_name == ".plt" || sec_name == ".iplt" || sec_name.rfind(".plt.", 0) == 0 ||
++        sec_name.rfind(".iplt.", 0) == 0) {
++      plt_sections.emplace_back(sec.vma, sec_name);
++    }
++  }
++  std::sort(plt_sections.begin(), plt_sections.end());
++
++  for (auto &[_plt_vma, plt_sec_name] : plt_sections) {
++    auto &plt_section = elf_obj.code_sections[plt_sec_name];
+     uint64_t ins_i = 0;
+     while (ins_i < plt_section.size) {
+       auto b_entry = plt_section.vma + ins_i;

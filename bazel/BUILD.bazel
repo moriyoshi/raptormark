@@ -1,0 +1,20 @@
+# Starlark helpers. No targets: these are loaded by //builder and //runtime.
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "sdk.bzl",
+    "llvm_tool.bzl",
+    "wasi_object.bzl",
+    "crates.bzl",
+])
+
+# What ecvisor is compiled for. The lifted module and the supervisor share one
+# wasm32-wasip1 link, so this is the only target that matters for //runtime --
+# the LLVM tools in //builder are host binaries and stay on the host platform.
+platform(
+    name = "wasm32_wasip1",
+    constraint_values = [
+        "@platforms//cpu:wasm32",
+        "@platforms//os:wasi",
+    ],
+)

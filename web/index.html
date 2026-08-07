@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>raptormark in a tab</title>
+<style>
+  body {
+    font:
+      14px/1.5 ui-monospace,
+      monospace;
+    margin: 2rem;
+    max-width: 60rem;
+  }
+  #out {
+    white-space: pre-wrap;
+    background: #111;
+    color: #eee;
+    padding: 1rem;
+    border-radius: 6px;
+    min-height: 12rem;
+    overflow-x: auto;
+  }
+  .meta {
+    color: #666;
+  }
+</style>
+
+<h1>raptormark</h1>
+<p class="meta">
+  An aarch64 Linux container image, translated ahead of time to one WebAssembly
+  module and supervised by ecvisor, running in this tab.
+</p>
+<p class="meta" id="status">idle</p>
+<div id="out"></div>
+
+<script type="module">
+  // The BUNDLE, not the sources: node strips types for its own host, but a
+  // browser cannot, and `.ts` imports have extensions no browser resolves.
+  // `npm run build` produces this.
+  import { runInBrowser } from "./dist/raptormark.js";
+
+  const out = document.getElementById("out");
+  const status = document.getElementById("status");
+  const q = new URLSearchParams(location.search);
+
+  // Batched, not one append per write. ecvisor writes whenever it has bytes,
+  // and touching the DOM per write is itself enough to dominate a chatty guest.
+  let buf = "";
+  let scheduled = false;
+  function emit(text) {
+    buf += text;
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      out.textContent += buf;
+      buf = "";
+      scheduled = false;
+    });
+  }
+
+  // Reported back to the harness. `window.__result` is what a browser test
+  // reads; a human reads the page.
+  window.__result = undefined;
+
+  const args = q.getAll("arg");
+
+  try {
+    status.textContent = "loading module...";
+    // Echoed because a guest that silently got no argv looks exactly like a
+    // guest that chose its defaults on purpose.
+    emit(`[host] argv ${JSON.stringify(args)}\n`);
+    const result = await runInBrowser({
+      moduleUrl: q.get("module") ?? "./guest.wasm",
+      rootfsUrl: q.get("rootfs") ?? undefined,
+      version: q.get("v") ?? undefined,
+      relayUrl: q.get("relay") ?? undefined,
+      args,
+      onOutput: (fd, text) => emit(text),
+      onProgress: (got, total) => {
+        status.textContent = total
+          ? `downloading ${(got / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`
+          : `downloading ${(got / 1e6).toFixed(1)} MB`;
+      },
+    });
+    status.textContent = `exit ${result.exitCode} — ${result.slices} slices, ${result.idleWaits} idle`;
+    window.__result = result;
+  } catch (err) {
+    status.textContent = `failed: ${err}`;
+    emit(`\n[host] ${err?.stack ?? err}\n`);
+    window.__result = { error: String(err) };
+  }
+</script>

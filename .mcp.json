@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "decode-oracle": {
+      "command": "go",
+      "args": ["run", "./cmd/decode-mcp"],
+      "cwd": "tools/decode-oracle"
+    }
+  }
+}

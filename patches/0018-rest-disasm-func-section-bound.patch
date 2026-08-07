@@ -1,0 +1,33 @@
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+index 6dab848..4f84018 100644
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -30,7 +30,27 @@ std::string AArch64TraceManager::AddRestDisasmFunc(uint64_t addr) {
+   } else if (upper_addr_2 != rest_disasm_funcs.end()) {
+     end_addr = upper_addr_2->first;
+   } else {
+-    LOG(FATAL) << "[Bug] does not handle the pattern of having last rest_disasm_func.";
++    // raptormark: no known function follows, so bound the synthetic function by
++    // the end of the code section that contains it.
++    //
++    // The original aborted here. That was survivable while every lifted binary
++    // was statically linked, where the entry closure sits well inside `.text`
++    // and something always follows. A fused image (internal/fuse) merges each
++    // library's sections alongside the executable's, so a `bl` into the highest
++    // merged code section legitimately has nothing above it -- and the whole
++    // lift died on a target that is perfectly well formed.
++    end_addr = 0;
++    for (auto &[_, code_section] : elf_obj.code_sections) {
++      if (addr >= code_section.vma && addr < code_section.vma + code_section.size) {
++        end_addr = code_section.vma + code_section.size;
++        break;
++      }
++    }
++    if (end_addr == 0) {
++      // Genuinely outside every code section: nothing sane to disassemble.
++      LOG(FATAL) << "[Bug] rest_disasm_func at 0x" << std::hex << addr
++                 << " lies outside every code section.";
++    }
+   }
+   rest_disasm_funcs.insert({addr, DisasmFunc(rest_fun_name, addr, end_addr - addr)});
+   return rest_fun_name;

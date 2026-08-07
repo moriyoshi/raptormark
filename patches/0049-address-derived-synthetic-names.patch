@@ -1,0 +1,83 @@
+raptormark: name every lifted function by its guest address.
+
+Two paths in SetELFData build a name by hand instead of going through
+GetUniqueLiftedFuncName, which every symbol-derived function uses and which
+produces `<sym>_____<hex>`: the PLT stubs (`fn_plt_<hex>`) and the `main` wrapper
+(`__wrap_main`). AddRestDisasmFunc already goes through it. After this change
+every function the lifter emits from guest code carries its address, with no
+exceptions -- which is what lets a downstream tool tell guest code from remill's
+own code by the name alone.
+
+builder/namespace-object needs exactly that. It decides which definitions may
+carry ONE name across the programs of a closure by reading the `_____<hex>`
+address out of the name and comparing it against the closure's first library
+base. The two hand-named paths were invisible to it and were tagged per program.
+
+The two cases pull in opposite directions, which is why both matter:
+
+  - PLT stubs. Measured on Debian /bin/echo and /bin/cat fused with a shared
+    library layout, 442 of the 1002 stub references are at LIBRARY addresses:
+    identical code at a closure-fixed address in both programs, kept apart by the
+    name alone. They reached 89 of 90 partitions, the widest single obstacle to
+    sharing a compiled partition. Named by address, they share.
+
+  - __wrap_main. This one wraps the guest's own `main`, so its body differs in
+    every program, and it must NOT share. Bare, it is a function with no address
+    in its name; remill's `extern "C"` glue is the only other source of such
+    functions and that glue IS program-independent, so a rule keyed on "function
+    without an address" would have shared two different bodies under one name.
+    Named by address it lands below the closure's first library base and is kept
+    per program, as it must be.
+
+elfconv's own runtime recognises stubs with strncmp(name, "fn_plt", 6)
+(runtime/VmIntrinsics.cpp), which `fn_plt_____<hex>` still satisfies.
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -184,10 +184,24 @@
+           break;
+         }
+       }
+-      std::stringstream fn_name;
+-      fn_name << "fn_plt_" << std::hex << b_entry;
++      // Name a PLT stub the way every other lifted function is named.
++      //
++      // This path built the name by hand and skipped GetUniqueLiftedFuncName,
++      // so a stub came out `fn_plt_<hex>` while a symbol-derived function comes
++      // out `<sym>_____<hex>`. Nothing downstream parsed the difference until
++      // cross-program reuse did: builder/namespace-object decides which
++      // definitions may carry one name across the programs of a closure by
++      // reading the `_____<hex>` address out of the name, and a stub has no such
++      // address to read. Every stub was therefore tagged per program -- including
++      // the 442 of them that sit in LIBRARY sections at a closure-fixed address
++      // and are identical in every program. They reached 89 of 90 partitions.
++      //
++      // GetUniqueLiftedFuncName("fn_plt", b_entry) gives `fn_plt_____<hex>`.
++      // elfconv's own runtime matches these with strncmp(name, "fn_plt", 6),
++      // which is unaffected.
+       disasm_funcs.emplace(b_entry,
+-                           DisasmFunc(fn_name.str(), b_entry, (plt_section.vma + ins_i) - b_entry));
++                           DisasmFunc(GetUniqueLiftedFuncName("fn_plt", b_entry), b_entry,
++                                      (plt_section.vma + ins_i) - b_entry));
+     }
+   }
+ 
+@@ -216,8 +230,18 @@
+             /* nop */ _s_fn_bytes[i + 8] == 0x1f && _s_fn_bytes[i + 9] == 0x20 &&
+             _s_fn_bytes[i + 10] == 0x03 && _s_fn_bytes[i + 11] == 0xd5) {
+           uint64_t __wrap_main_vma = s_t_addrs[j] + i;
++          // Address-derived for the same reason as the PLT stubs above, but the
++          // consequence here is the opposite one: this wraps the guest's own
++          // `main`, so its body differs in every program. Left bare, it is a
++          // FUNCTION with no address in its name, and any rule that treats such
++          // functions as program-independent -- which they otherwise are, since
++          // remill's `extern "C"` glue is the only other source of them -- would
++          // share two different bodies under one name. Naming it by address puts
++          // it below the closure's first library base, where it is correctly
++          // kept per program.
+           disasm_funcs.emplace(__wrap_main_vma,
+-                               DisasmFunc("__wrap_main", __wrap_main_vma, __wrap_main_size));
++                               DisasmFunc(GetUniqueLiftedFuncName("__wrap_main", __wrap_main_vma),
++                                          __wrap_main_vma, __wrap_main_size));
+           __wrap_main_found = true;
+           goto found_entry;
+         }

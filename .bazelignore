@@ -1,0 +1,14 @@
+# ❌ third_party/elfconv is a pinned submodule built by its OWN Dockerfile and
+# CMake, and CLAUDE.md forbids working-tree edits to it. Bazel must not descend
+# into it: it would take minutes to glob and any BUILD file Bazel found there
+# would be upstream's, not ours.
+third_party/elfconv
+
+# Build outputs and caches that are not sources.
+runtime/target
+web/node_modules
+web/dist
+.agents-workspace
+
+# Untracked recovery evidence, kept on disk deliberately (CLAUDE.md).
+_recovery

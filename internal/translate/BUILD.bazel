@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "translate",
+    srcs = [
+        "cache.go",
+        "experimental.go",
+        "translate.go",
+    ],
+    importpath = "raptormark/internal/translate",
+    visibility = ["//:__subpackages__"],
+)
+
+# ❗ The package's own sources, as DATA for `TestEveryEnvSwitchIsClassified`,
+# which scans them for `os.Getenv("RAPTORMARK_*")`.
+#
+# ⚠️ Declared rather than tagging the test `manual`, which is what
+# //internal/rootfs and //internal/builder had to do. AGENTS.md: opting the
+# package out of `bazel test` to satisfy one file loses the compile coverage of
+# every test beside it. Bazel sandboxes tests with only declared inputs, so
+# without this the scan finds no files and FATALs -- deliberately, rather than
+# skipping.
+filegroup(
+    name = "gosrcs",
+    srcs = [
+        "cache.go",
+        "experimental.go",
+        "translate.go",
+    ],
+)
+
+go_test(
+    name = "translate_test",
+    srcs = [
+        "libcachedir_test.go",
+        "translate_test.go",
+    ],
+    data = [":gosrcs"],
+    embed = [":translate"],
+)

@@ -1,0 +1,65 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "raptormark_lib",
+    srcs = ["main.go"],
+    importpath = "raptormark/cmd/raptormark",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/builder",
+        "//internal/oci",
+        "//internal/pipeline",
+        "//internal/preserve",
+        "//internal/serve",
+        "@com_github_alecthomas_kong//:kong",
+    ],
+)
+
+# The host CLI.
+go_binary(
+    name = "raptormark",
+    embed = [":raptormark_lib"],
+    visibility = ["//visibility:public"],
+)
+
+# ── raptormark-builder-tools ────────────────────────────────────────────────
+# The SAME main package, cross-built to run INSIDE the builder image as
+# translate-one / link-all. `internal/builder.buildTools` built this with
+# `CGO_ENABLED=0 GOOS=<image os> GOARCH=<image arch> go build -trimpath`; `pure`
+# is CGO_ENABLED=0 and rules_go trims paths already.
+#
+# ⚠️ WHY THESE ARE EXPLICIT PER-ARCH TARGETS rather than one target retargeted
+# by a flag. The arch is not a property of the invocation, it is a property of
+# the IMAGE being built, which `buildimage.go` reads off the base with
+# `docker image inspect`. A named target per arch is what lets the image
+# assembly depend on the right one by label instead of hoping the caller passed
+# a matching `--platforms`.
+#
+# ⚠️ AND WHY THE IMAGE MUST DEPEND ON ONE OF THESE. CLAUDE.md: "A raw
+# `docker build` does NOT rebuild the pipeline binary" -- the Dockerfile COPYed
+# a prebuilt file, so a stale binary shipped while every label claimed
+# otherwise, and that cost a void gate on 2026-08-18. A Bazel edge from the
+# image to this target makes that unrepresentable: the binary cannot be stale,
+# because the image cannot be built without building it.
+
+# keep
+go_binary(
+    name = "builder_tools_linux_arm64",
+    out = "raptormark-builder-tools",
+    embed = [":raptormark_lib"],
+    goarch = "arm64",
+    goos = "linux",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+# keep
+go_binary(
+    name = "builder_tools_linux_amd64",
+    out = "raptormark-builder-tools-amd64",
+    embed = [":raptormark_lib"],
+    goarch = "amd64",
+    goos = "linux",
+    pure = "on",
+    visibility = ["//visibility:public"],
+)

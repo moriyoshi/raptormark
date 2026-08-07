@@ -1,0 +1,226 @@
+diff --git a/backend/remill/include/remill/BC/TraceLifter.h b/backend/remill/include/remill/BC/TraceLifter.h
+--- a/backend/remill/include/remill/BC/TraceLifter.h
++++ b/backend/remill/include/remill/BC/TraceLifter.h
+@@ -28,6 +28,7 @@
+ #include <tuple>
+ #include <unordered_map>
+ #include <unordered_set>
++#include <vector>
+ 
+ namespace remill {
+ 
+@@ -119,6 +120,38 @@
+     return true;
+   }
+ 
++  // Appends, in increasing address order, every BTI *jump* landing pad
++  // (`bti j` / `bti jc`) at a 4-byte step from `lo` in [lo, hi), stopping at the
++  // first `bti c` -- the next function entry -- or at the first unreadable word.
++  //
++  // This is the BTI landing-pad scan of the seeding block in `Impl::Lift`,
++  // hoisted behind an interface so a manager that can answer it from an index
++  // may do so. The default below IS that loop, so the answer is defined by the
++  // scan and an override is only allowed to be faster, never different.
++  //
++  // Why it is worth an interface: the scan runs once per lifted function and
++  // reads a word per 4-byte slot until it meets a `bti c`. A binary built
++  // WITHOUT branch protection has none -- busybox has 0 markers in 268,891
++  // instructions, bash 26 in 524,416 -- so the loop runs to the caller's
++  // 512 KiB cap every single time, re-reading the same megabytes for every
++  // function, and it cannot seed anything because a binary with no `bti c` has
++  // no `bti j` either. patches/0038 and 0040 made each read cheap; they did not
++  // make the reads fewer.
++  virtual void CollectBTIJumpPads(uint64_t lo, uint64_t hi, std::vector<uint64_t> *pads) {
++    for (uint64_t addr = lo; addr < hi; addr += 4) {
++      uint32_t word = 0;
++      if (!TryReadExecutableWord32(addr, &word)) {
++        break;  // ran off executable memory
++      }
++      if (word == 0xD503245FU) {
++        break;  // next function entry (bti c) -- stop before crossing into it
++      }
++      if (word == 0xD503249FU || word == 0xD50324DFU) {  // bti j / bti jc
++        pads->push_back(addr);
++      }
++    }
++  }
++
+   /* get vma end address of the target function */
+   virtual uint64_t GetFuncVMA_E(uint64_t vma_s) = 0;
+ 
+@@ -423,6 +456,9 @@
+   // only ask whether a pc is present, once per 4-byte slot across a 512 KiB
+   // range. This answers that in O(1) while the map keeps the ordering.
+   std::unordered_set<uint64_t> lifted_block_pcs;
++  // Scratch for CollectBTIJumpPads, kept across traces so the seeding block
++  // does not allocate per function. Cleared at each use, not at each trace.
++  std::vector<uint64_t> bti_jump_pads;
+   std::map<llvm::BasicBlock *, uint64_t> rev_lifted_block_map;
+   std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> br_blocks;
+   bool lift_all_insn;
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -1078,22 +1078,21 @@
+       constexpr uint64_t kFuncCap = 0x80000;  // 512 KiB: hard cap when no next bti c is seen
+       constexpr size_t kMaxSeed = 65536;      // backstop against a pathological run
+       size_t seeded = 0;
+-      for (uint64_t insn_vma = trace_addr + 4;
+-           insn_vma < trace_addr + kFuncCap && seeded < kMaxSeed; insn_vma += 4) {
+-        uint32_t word = 0;
+-        if (!manager.TryReadExecutableWord32(insn_vma, &word)) {
+-          break;  // ran off executable memory
++      // The scan itself now lives behind `TraceManager::CollectBTIJumpPads`, whose
++      // default implementation is this loop verbatim -- so what gets seeded is
++      // unchanged and a manager that keeps an index of the pads answers the same
++      // question without re-reading the range for every function.
++      bti_jump_pads.clear();
++      manager.CollectBTIJumpPads(trace_addr + 4, trace_addr + kFuncCap, &bti_jump_pads);
++      for (uint64_t pad_vma : bti_jump_pads) {
++        if (seeded >= kMaxSeed) {
++          break;
+         }
+-        if (word == 0xD503245FU) {
+-          break;  // next function entry (bti c) -- stop before crossing into it
+-        }
+-        if (lifted_block_pcs.count(insn_vma) != 0) {
++        if (lifted_block_pcs.count(pad_vma) != 0) {
+           continue;
+         }
+-        if (word == 0xD503249FU || word == 0xD50324DFU) {  // bti j / bti jc
+-          inst_work_list.insert(insn_vma);
+-          ++seeded;
+-        }
++        inst_work_list.insert(pad_vma);
++        ++seeded;
+       }
+       // Fused non-BTI fallback. A branch-protected binary marks every jump-table case with
+       // `bti j`/`bti jc`, so the scan above resolves it. But `clang -static` against a NON-BTI
+diff --git a/lifter/TraceManager.h b/lifter/TraceManager.h
+--- a/lifter/TraceManager.h
++++ b/lifter/TraceManager.h
+@@ -47,6 +47,7 @@
+   llvm::Function *GetLiftedTraceDefinition(uint64_t addr);
+   bool TryReadExecutableByte(uint64_t addr, uint8_t *byte);
+   bool TryReadExecutableWord32(uint64_t addr, uint32_t *word) override;
++  void CollectBTIJumpPads(uint64_t lo, uint64_t hi, std::vector<uint64_t> *pads) override;
+   std::string GetLiftedFuncName(uint64_t addr);
+   std::string GetUniqueLiftedFuncName(std::string func_name, uint64_t vma_s);
+   bool isFunctionEntry(uint64_t addr);
+@@ -71,6 +72,20 @@
+   };
+   std::vector<CodeRange> code_ranges;  // sorted by vma, built once in SetELFData
+   size_t last_code_range = 0;  // instruction fetches walk forward, so cache the last hit
++
++  // Where the AArch64 branch-protection landing pads are, built lazily by one
++  // pass over code_ranges. The BTI seeding scan in TraceLifter asked this per
++  // lifted function over a 512 KiB window; on a binary with no `bti c` -- which
++  // is every non-branch-protected binary, so busybox and bash both -- nothing
++  // ever stopped it early, so it re-read the same megabytes thousands of times
++  // to find nothing. The bytes are immutable, so the answer is too.
++  std::vector<uint64_t> bti_c_vmas;  // function entries: where the scan stops
++  std::vector<uint64_t> bti_j_vmas;  // jump targets: what the scan seeds
++  bool bti_index_built = false;
++  void BuildBTIIndex();
++  // End of the maximal gap-free run of code ranges covering `addr`, or 0 when
++  // `addr` is not in one. This is how far a read can walk before it fails.
++  uint64_t ContiguousCodeEnd(uint64_t addr);
+   std::unordered_map<uintptr_t, llvm::Function *> traces;
+   std::map<uintptr_t, DisasmFunc> disasm_funcs;
+   std::map<uintptr_t, DisasmFunc> rest_disasm_funcs;
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -114,6 +114,92 @@
+   return TraceManager::TryReadExecutableWord32(addr, word);
+ }
+ 
++uint64_t AArch64TraceManager::ContiguousCodeEnd(uint64_t addr) {
++  // The address at which a read starting from `addr` first leaves executable
++  // memory. `TryReadExecutableByte` accepts any byte inside any code range, and
++  // the base's word read is four of those, so a word straddling two ADJACENT
++  // sections is readable and the extent is the end of the maximal run of ranges
++  // that covers `addr` with no gap -- not the end of the one range holding it.
++  auto it = std::upper_bound(code_ranges.begin(), code_ranges.end(), addr,
++                             [](uint64_t a, const CodeRange &r) { return a < r.vma; });
++  if (it == code_ranges.begin()) {
++    return 0;  // before every range
++  }
++  --it;
++  uint64_t end = it->vma + it->size;
++  if (addr >= end) {
++    return 0;  // in a gap between ranges: the very first read fails
++  }
++  for (++it; it != code_ranges.end() && it->vma <= end; ++it) {
++    end = std::max(end, static_cast<uint64_t>(it->vma + it->size));
++  }
++  return end;
++}
++
++void AArch64TraceManager::BuildBTIIndex() {
++  if (bti_index_built) {
++    return;
++  }
++  bti_index_built = true;
++  // One pass over the guest's executable bytes, recording where the landing
++  // pads are. The scan this replaces asked the same question once per lifted
++  // function over a 512 KiB window, so it re-read most of .text a few thousand
++  // times; the answer never changes, because the bytes never change.
++  for (const auto &r : code_ranges) {
++    const uint64_t end = r.vma + r.size;
++    for (uint64_t a = (r.vma + 3) & ~UINT64_C(3); a < end; a += 4) {
++      uint32_t word = 0;
++      // Read through the same path the scan used, so a word straddling two
++      // sections is seen exactly as the scan saw it.
++      if (!TryReadExecutableWord32(a, &word)) {
++        continue;
++      }
++      if (word == 0xD503245FU) {  // bti c
++        bti_c_vmas.push_back(a);
++      } else if (word == 0xD503249FU || word == 0xD50324DFU) {  // bti j / bti jc
++        bti_j_vmas.push_back(a);
++      }
++    }
++  }
++  // Ranges are sorted and are not expected to overlap, but neither is asserted
++  // anywhere, and a duplicate or an inversion would silently change the answer.
++  for (auto *v : {&bti_c_vmas, &bti_j_vmas}) {
++    std::sort(v->begin(), v->end());
++    v->erase(std::unique(v->begin(), v->end()), v->end());
++  }
++}
++
++void AArch64TraceManager::CollectBTIJumpPads(uint64_t lo, uint64_t hi, std::vector<uint64_t> *pads) {
++  // The index holds 4-byte-aligned addresses, which is the walk the base scan
++  // performs when `lo` is aligned -- always, since `lo` is a trace address plus
++  // 4 and aarch64 instructions are 4-aligned. If it ever is not, defer to the
++  // scan rather than answer a slightly different question.
++  if ((lo & 3) != 0) {
++    TraceManager::CollectBTIJumpPads(lo, hi, pads);
++    return;
++  }
++  BuildBTIIndex();
++
++  // Reproduce the scan's two stopping conditions as one exclusive bound.
++  uint64_t limit = hi;
++  const uint64_t code_end = ContiguousCodeEnd(lo);
++  if (code_end < lo + 4) {
++    return;  // the first read already fails
++  }
++  // The last readable word starts at code_end - 4, so the exclusive bound is
++  // code_end - 3.
++  limit = std::min(limit, code_end - 3);
++  const auto next_c = std::lower_bound(bti_c_vmas.begin(), bti_c_vmas.end(), lo);
++  if (next_c != bti_c_vmas.end()) {
++    limit = std::min(limit, *next_c);  // stop BEFORE the next function entry
++  }
++
++  for (auto it = std::lower_bound(bti_j_vmas.begin(), bti_j_vmas.end(), lo);
++       it != bti_j_vmas.end() && *it < limit; ++it) {
++    pads->push_back(*it);
++  }
++}
++
+ bool AArch64TraceManager::TryReadExecutableByte(uint64_t addr, uint8_t *byte) {
+ 
+   // Consecutive reads land in the same section almost every time, so try the

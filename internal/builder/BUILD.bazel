@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "builder",
+    srcs = [
+        "bazel.go",
+        "buildimage.go",
+        "buildtools.go",
+        "errors.go",
+        "exec.go",
+        "libcache.go",
+        "linkall.go",
+        "partcache.go",
+        "stablesplit.go",
+        "timing.go",
+        "toolsid.go",
+        "translateone.go",
+    ],
+    importpath = "raptormark/internal/builder",
+    visibility = ["//:__subpackages__"],
+)
+
+# ⚠️ NOT run by `bazel test //...`, and the Go gate is the reason it does not
+# need to be. These tests read the repo tree by relative path
+# (TestTranslateSourcesExist stats ../../builder/ecv-split.cpp) and shell out to
+# `go` (repoRoot runs `go env GOMOD`, via TestBuildToolsWritesWhatTheDockerfileCopies
+# and TestWorkspaceCoversEveryModule). Bazel's sandbox has neither, so they fail
+# here for reasons that say nothing about the code.
+#
+# ❌ Do not "fix" this by declaring the whole repo as data. The authority for Go
+# tests is `go test ./...` (CLAUDE.md, QUALITY_GATE.md §1), which runs them with
+# the tree in place and passes. Running them twice, one of the two lying, is
+# worse than running them once.
+go_test(
+    name = "builder_test",
+    srcs = [
+        "buildimage_test.go",
+        "libcache_test.go",
+        "linkall_test.go",
+        "partcache_test.go",
+        "timing_test.go",
+        "translateone_test.go",
+        "bazelsrcs_test.go",
+        "workspace_test.go",
+    ],
+    embed = [":builder"],
+    tags = ["manual"],  # keep
+)

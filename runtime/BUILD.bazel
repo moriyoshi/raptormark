@@ -1,0 +1,200 @@
+# ecvisor: the supervisor runtime, and the two C shims that sit beside it.
+#
+# Moved here from `RUN` lines in builder/Dockerfile. What the image gets is
+# unchanged; what changes is that these are addressable targets, so a runtime
+# edit rebuilds an archive instead of rebuilding an image.
+#
+# ⚠️ NOT in `internal/builder.translateSources`, and that is deliberate: the
+# lifted `.o` does not depend on the runtime, which is why CLAUDE.md can say "if
+# only runtime/ changed, relink -- do not re-lift". Adding any of this to
+# TranslateSH would invalidate every cached object for a change that cannot
+# alter one.
+
+load("@raptormark_sdk//:defs.bzl", "LLVM_PREFIX", "WASI_SDK_PATH")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:crates.bzl", "CRATE_CHECKSUMS")
+load("//bazel:ecvisor.bzl", "ecvisor_profile")
+load("//bazel:wasi_object.bzl", "wasi_object")
+load("//bazel:wasm_transition.bzl", "wasm_artifacts")
+
+package(default_visibility = ["//visibility:public"])
+
+# Exported so //runtime/loopback and //runtime/browser can compile the SAME
+# sources with a different feature. They are separate packages for one reason:
+# all three archives must be called `libecvisor.a` -- the crate name is
+# `ecvisor` in every profile, exactly as it was under cargo, because renaming
+# the crate would change symbol mangling -- and three targets producing one
+# filename in one package is a conflicting-action error.
+filegroup(
+    name = "srcs",
+    srcs = glob(["src/**/*.rs"]),
+)
+
+exports_files(["src/lib.rs"])
+
+# The three network backends. EXACTLY ONE is compiled in per archive, and it is
+# selected at COMPILE time rather than at run time: wasm-ld emits an import for
+# every undefined symbol reachable from live code, so a `dyn` trait object or an
+# enum with a match would keep both backends live and put both import sets in
+# the module. See runtime/src/net/mod.rs.
+#
+# That is also why these are three targets rather than one target with a flag:
+# the loopback archive exists specifically to make "this module imports no
+# sockets" checkable by linking against it, and a build that could silently
+# produce the wrong one would defeat the check.
+
+# The server profile: WasmEdge's non-standard preview1 socket extension. This
+# one is in //runtime itself because it is the default the image ships as
+# /opt/ecvisor/libecvisor.a; the other two sit under it.
+ecvisor_profile(
+    srcs = ":srcs",
+    crate_root = "src/lib.rs",
+    feature = "net-wasmedge",
+)
+
+wasi_object(
+    name = "ecv_sp",
+    src = "cshim/ecv_sp.c",
+)
+
+wasi_object(
+    name = "ecv_globals",
+    src = "cshim/ecv_globals.c",
+)
+
+# The three archives, built for wasm32-wasip1 regardless of the platform the
+# invocation asked for. Depend on THIS, not on the rust targets directly: a
+# host-platform consumer (a test, the image) would otherwise pull them into the
+# host configuration and get an aarch64 archive.
+wasm_artifacts(
+    name = "profiles",
+    srcs = [
+        ":ecvisor",
+        "//runtime/browser:ecvisor",
+        "//runtime/loopback:ecvisor",
+        # ⚠️ `//runtime/wasix` is in BOTH this group and `:loader_profiles`,
+        # because it is the only archive that carries a non-default NET backend
+        # and a non-default LOADER at once. The two tests ask different
+        # questions of it and neither subsumes the other.
+        "//runtime/wasix:ecvisor",
+    ],
+)
+
+# The two archives `loader_exclusion_test` compares: the SHIPPING one and a
+# `load-hosted` build of the same sources. Separate from `:profiles`, which
+# pairs the three NETWORK backends -- the two tests ask different questions and
+# a merged group would make each drag in archives it does not read.
+#
+# ⚠️ `wasm_artifacts`, NOT `filegroup`, for the reason stated above `:profiles`:
+# a host-platform consumer pulls a plain filegroup's rust targets into the HOST
+# configuration and gets an aarch64 archive. Measured: as a filegroup this
+# yielded archives with 2 exported entry points instead of 16, and with the
+# loader backend cfg'd out entirely -- so the exclusion assertion passed while
+# proving nothing. The test's own positive control is what caught it.
+wasm_artifacts(
+    name = "loader_profiles",
+    srcs = [
+        ":ecvisor",
+        # The attribution control: same net backend as `hosted`, no loader
+        # feature. See the LOOPBACK block in loader_exclusion_test.sh.
+        #
+        # ⚠️ It is NO LONGER `wasix`'s net backend -- that moved to `net-wasix`
+        # when WASIX sockets landed. The control still holds because the pattern
+        # names `ecvisor::loader::`, which cannot match `ecvisor::net::wasix`,
+        # and the test asserts that explicitly rather than leaving it implied.
+        "//runtime/hosted:ecvisor",
+        "//runtime/loopback:ecvisor",
+        "//runtime/wasix:ecvisor",
+    ],
+)
+
+filegroup(
+    name = "cshim",
+    srcs = [
+        ":ecv_globals",
+        ":ecv_sp",
+    ],
+)
+
+# Both shims must still be byte-identical to what builder/Dockerfile's `RUN`
+# line produced. Verified 2026-08-23, 2/2.
+sh_test(
+    name = "cshim_equivalence_test",
+    size = "small",
+    srcs = ["cshim_equivalence_test.sh"],
+    data = [
+        "cshim/ecv_globals.c",
+        "cshim/ecv_sp.c",
+        ":ecv_globals",
+        ":ecv_sp",
+    ],
+    env = {"WASI_SDK_PATH": WASI_SDK_PATH},
+    tags = [
+        "local",
+        "no-remote",
+    ],
+)
+
+# Each profile carries exactly one network backend. See the script header for
+# what this does and does not prove -- it reads archives, not linked modules.
+# ⚠️ Reads ARCHIVES, not linked modules -- see the header of the script for what
+# that does and does not prove.
+sh_test(
+    name = "loader_exclusion_test",
+    size = "small",
+    srcs = ["loader_exclusion_test.sh"],
+    data = [":loader_profiles"],
+    env = {"LLVM_PREFIX": LLVM_PREFIX},
+    tags = [
+        "local",
+        "no-remote",
+    ],
+)
+
+sh_test(
+    name = "profile_exclusion_test",
+    size = "small",
+    srcs = ["profile_exclusion_test.sh"],
+    data = [":profiles"],
+    env = {"LLVM_PREFIX": LLVM_PREFIX},
+    tags = [
+        "local",
+        "no-remote",
+    ],
+)
+
+# The crate hashes in `bazel/crates.bzl` are the same numbers as
+# `runtime/Cargo.lock`'s `checksum` fields.
+#
+# ❗ `crates.bzl`'s docstring has claimed "`//runtime:cargo_lock_agrees_test`
+# fails if they ever stop being" since it was written. The target did not exist
+# until 2026-08-27, and neither did a consumer for the `CRATE_CHECKSUMS` it
+# exports "so a test can assert these agree" -- so the two files really were a
+# second source of truth, kept in step by a sentence.
+#
+# ⚠️ THE GENRULE IS WHAT MAKES THIS NOT A THIRD COPY. It writes out the SAME
+# Starlark constant the fetch uses, so the script compares Cargo.lock against
+# what Bazel actually fetches rather than against a transcription of it. Sorted
+# for a stable comparison.
+genrule(
+    name = "crate_checksums_txt",
+    outs = ["crate_checksums.txt"],
+    cmd = "printf '%s\\n' " + " ".join([
+        "'{} {}'".format(k, v)
+        for k, v in sorted(CRATE_CHECKSUMS.items())
+    ]) + " | sort > $@",
+)
+
+sh_test(
+    name = "cargo_lock_agrees_test",
+    size = "small",
+    srcs = ["cargo_lock_agrees_test.sh"],
+    args = [
+        "$(location Cargo.lock)",
+        "$(location :crate_checksums_txt)",
+    ],
+    data = [
+        "Cargo.lock",
+        ":crate_checksums_txt",
+    ],
+)

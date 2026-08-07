@@ -1,0 +1,36 @@
+# Which toolchain the companion tools link against. See //bazel:sdk.bzl.
+#
+# `image` is the default because it is the only one that PROVES the move out of
+# builder/Dockerfile changed nothing: the tools link against the same LLVM 16 and
+# wasi-sdk that elflift was built with, because they are the ones in the pinned
+# base image. It requires the build to run inside that image.
+build:image --repo_env=RAPTORMARK_BAZEL_SDK=image
+build:hermetic --repo_env=RAPTORMARK_BAZEL_SDK=hermetic
+build --config=image
+
+# `--config=hermetic` downloads LLVM 16.0.6 (~914 MB) and wasi-sdk 24.0
+# (~120 MB), both verified by sha256, and needs no Docker at all. Measured
+# 2026-08-23 by builder/hermetic_differential.sh: 6 of the 10 staged artifacts
+# come out byte-identical to the in-image build, the 4 LLVM tools do not (Debian
+# links one shared libLLVM, upstream links static components), and the objects
+# they emit ARE identical.
+#
+# ❌ Do not stage a hermetic build into the builder image from a host whose
+# glibc is newer than the image's: the tools load with `GLIBC_2.38 not found`.
+
+# The in-image toolchain is reached by absolute path (/usr/lib/llvm-16,
+# $WASI_SDK_PATH), so actions must be able to read outside the workspace. The
+# linux sandbox mounts the filesystem read-only by default, which is exactly
+# what these actions need and no more.
+build --sandbox_default_allow_network=false
+
+# WASI_SDK_PATH comes from the base image's login shell. It is an input to the
+# repo rule (see `environ` in //bazel:sdk.bzl), not to individual actions.
+build --incompatible_strict_action_env
+
+# runtime/Cargo.toml's `[profile.release] lto = true`. It is a build setting
+# rather than a per-target rustc flag because it has to reach miniz_oxide and
+# adler2 as well; see the note in //runtime:BUILD.bazel.
+build --@rules_rust//rust/settings:lto=fat
+
+test --test_output=errors

@@ -1,0 +1,172 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a1482c8..d8cd032 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -4670,6 +4670,70 @@ bool TryDecodeFNMSUB_D_FLOATDP3(const InstData &data, Instruction &inst) {
+   return TryDecodeFMSUB_D_FLOATDP3(data, inst);
+ }
+ 
++// raptormark: FNMUL and FNMADD, which were generated stubs returning `false`.
++// The inventory of the postgres closure (2026-08-19) found 9 FNMUL sites and 2
++// FNMADD sites, all double, and one of the FNMUL sites is what stopped
++// `postgres --single` in `get_variable_numdistinct` on the planner's row-estimate
++// path -- the first undecoded instruction this project has met that is known to
++// be REACHED by a real workload.
++//
++// ⚠️ These build their operands directly rather than delegating to
++// `TryDecodeFMUL_*`, which is the obvious shortcut and is wrong: FMUL's decoder
++// calls `AddArrangementSpecifierFPSRStatus` when `float_exception_enabled`, so
++// the ISEL name would become `FNMUL_S_FLOATDP2_FPSRSTATUS` in that
++// configuration and resolve to nothing. `FNMSUB` above can delegate safely only
++// because `TryDecodeFMSUB_*` has no such branch.
++
++// FNMUL  <Sd>, <Sn>, <Sm>
++bool TryDecodeFNMUL_S_FLOATDP2(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegS, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rm);
++  return true;
++}
++
++// FNMUL  <Dd>, <Dn>, <Dm>
++bool TryDecodeFNMUL_D_FLOATDP2(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegD, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rm);
++  return true;
++}
++
++// FNMADD  <Sd>, <Sn>, <Sm>, <Sa>
++bool TryDecodeFNMADD_S_FLOATDP3(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegS, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rm);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Ra);
++  return true;
++}
++
++// FNMADD  <Dd>, <Dn>, <Dm>, <Da>
++bool TryDecodeFNMADD_D_FLOATDP3(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  if (IsUnallocatedFloatEncoding(data)) {
++    return false;
++  }
++  AddRegOperand(inst, kActionWrite, kRegD, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rm);
++  AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Ra);
++  return true;
++}
++
+ // FCMPE  <Sn>, <Sm>
+ bool TryDecodeFCMPE_S_FLOATCMP(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::State;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 4f90076..34730c3 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -14275,9 +14275,7 @@ bool TryDecodeFNMUL_H_FLOATDP2(const InstData &, Instruction &) {
+ //  30 0
+ //  31 0 M        0
+ // FNMUL  <Sd>, <Sn>, <Sm>
+-bool TryDecodeFNMUL_S_FLOATDP2(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFNMUL_S_FLOATDP2: implemented in Arch.cpp (negated FP multiply).
+ 
+ // FNMUL FNMUL_D_floatdp2:
+ //   0 x Rd       0
+@@ -14313,9 +14311,7 @@ bool TryDecodeFNMUL_S_FLOATDP2(const InstData &, Instruction &) {
+ //  30 0
+ //  31 0 M        0
+ // FNMUL  <Dd>, <Dn>, <Dm>
+-bool TryDecodeFNMUL_D_FLOATDP2(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFNMUL_D_FLOATDP2: implemented in Arch.cpp (negated FP multiply).
+ 
+ // SQSUB SQSUB_asisdsame_only:
+ //   0 x Rd       0
+@@ -36962,9 +36958,7 @@ bool TryDecodeFNMADD_H_FLOATDP3(const InstData &, Instruction &) {
+ //  30 0
+ //  31 0 M        0
+ // FNMADD  <Sd>, <Sn>, <Sm>, <Sa>
+-bool TryDecodeFNMADD_S_FLOATDP3(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFNMADD_S_FLOATDP3: implemented in Arch.cpp (negated FP multiply).
+ 
+ // FNMADD FNMADD_D_floatdp3:
+ //   0 x Rd       0
+@@ -37000,9 +36994,7 @@ bool TryDecodeFNMADD_S_FLOATDP3(const InstData &, Instruction &) {
+ //  30 0
+ //  31 0 M        0
+ // FNMADD  <Dd>, <Dn>, <Dm>, <Da>
+-bool TryDecodeFNMADD_D_FLOATDP3(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFNMADD_D_FLOATDP3: implemented in Arch.cpp (negated FP multiply).
+ 
+ // FCCMP FCCMP_H_floatccmp:
+ //   0 x nzcv     0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp b/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
+index 8611251..91b9602 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
+@@ -838,3 +838,44 @@ MAKE_FNMSUB(64);
+ 
+ DEF_ISEL(FNMSUB_S_FLOATDP3) = FNMSUB_32;
+ DEF_ISEL(FNMSUB_D_FLOATDP3) = FNMSUB_64;
++
++// FNMUL   <Sd>, <Sn>, <Sm>          Sd = -(Sn * Sm)
++// FNMADD  <Sd>, <Sn>, <Sm>, <Sa>    Sd = -Sa - Sn*Sm  ==  -(Sa + Sn*Sm)
++//
++// raptormark: the negation is the whole instruction, and it is NOT the same as
++// negating an operand. `-(a*b)` and `(-a)*b` agree on every finite value and
++// disagree on a NaN payload's sign bit and on which zero you get -- and the
++// guest chose the form that negates the RESULT. Written that way here for the
++// same reason `FNEG` is a sign operation rather than `0 - x`: `0 - (-0.0)` is
++// `+0.0`, so a subtract-from-zero spelling silently loses signed zero.
++namespace {
++
++#define MAKE_FNMUL(esize) \
++  DEF_SEM_F##esize##_STATE(FNMUL_##esize, RF##esize src1, RF##esize src2) { \
++    auto prod = FMul##esize(Read(src1), Read(src2)); \
++    return -prod; \
++  }
++
++MAKE_FNMUL(32);
++MAKE_FNMUL(64);
++
++#undef MAKE_FNMUL
++
++#define MAKE_FNMADD(esize) \
++  DEF_SEM_F##esize##_STATE(FNMADD_##esize, RF##esize src1, RF##esize src2, RF##esize src3) { \
++    auto prod = FMul##esize(Read(src1), Read(src2)); \
++    auto sum = FAdd##esize(prod, Read(src3)); \
++    return -sum; \
++  }
++
++MAKE_FNMADD(32);
++MAKE_FNMADD(64);
++
++#undef MAKE_FNMADD
++
++}  // namespace
++
++DEF_ISEL(FNMUL_S_FLOATDP2) = FNMUL_32;  // FNMUL  <Sd>, <Sn>, <Sm>
++DEF_ISEL(FNMUL_D_FLOATDP2) = FNMUL_64;  // FNMUL  <Dd>, <Dn>, <Dm>
++DEF_ISEL(FNMADD_S_FLOATDP3) = FNMADD_32;  // FNMADD  <Sd>, <Sn>, <Sm>, <Sa>
++DEF_ISEL(FNMADD_D_FLOATDP3) = FNMADD_64;  // FNMADD  <Dd>, <Dn>, <Dm>, <Da>

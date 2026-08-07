@@ -1,0 +1,72 @@
+Seed drvd_rmp with every register that will be STORED before a call.
+
+`VirtualRegsOpt::OptimizeVirtualRegsUsage` stores registers into the State
+struct before a lifted call, and takes their values from `cur_r_inst_mp`:
+
+    for (auto [str_er2, str_erc2] : t_bag->pres_str_rmp) {
+      if (str_er2.CheckStoreBeforeCall() && !strd.contains(str_er2)) {
+        ... GetRegValueFromCacheMap(str_er2, ..., cur_r_inst_mp)
+
+`GetRegValueFromCacheMap` does `cache_map.at(t_er)`, which THROWS when the
+register is absent. `cur_r_inst_mp` is seeded from `t_bag->drvd_rmp` -- every
+register there gets a PHI node at the top of the block -- so the code assumes
+
+    pres_str_rmp ∩ CheckStoreBeforeCall  ⊆  drvd_rmp
+
+and `TraceLifter.h` documents drvd_rmp as exactly "pres_str_rmp + (pres_ld_rmp &
+sucs_ld_rmp)", with no filter at all.
+
+The seeding loop filters by `CheckPassedArgsRegs` instead, and the two
+predicates are NOT the same set:
+
+    CheckPassedArgsRegs()  -> number 0..8, or SP, for ANY reg kind
+    CheckStoreBeforeCall() -> General: 0..30 or SP;  Vector: 8..15;  else SP
+
+`CheckStoreBeforeCall` was introduced by 0007-forkemu-sync-full-gp-regs-setjmp
+and is deliberately BROADER for general registers, so that glibc's hand-written
+setjmp -- which snapshots x19..x28, x29, x30, sp and v8..v15 into the jmp_buf --
+reads live values rather than stale globals. That patch widened the two STORE
+sites and left this seeding line on the narrow predicate, so any general
+register x9..x30, or vector register v8..v15, that reaches `pres_str_rmp` gets
+no PHI and the `.at()` above throws:
+
+    std::out_of_range: _Map_base::at
+    #4 remill::VirtualRegsOpt::GetRegValueFromCacheMap  VroTraceLifter.cpp:1000
+    #5 remill::VirtualRegsOpt::OptimizeVirtualRegsUsage VroTraceLifter.cpp:1204
+    #6 remill::TraceLifter::Impl::Optimize              VroTraceLifter.cpp:135
+
+Found on a raptormark UNIT image -- one dlopen'd library's sections emitted
+alone -- which is a shape that had never been lifted before. It is not specific
+to that shape: any trace whose preceding blocks store a callee-saved register
+can reach it. `--norm_mode=1`, which disables this optimisation entirely, lifts
+the same input to completion, which is what localised the fault to VRP.
+
+⚠️ THE UNION, not a replacement. `CheckPassedArgsRegs` admits VECTOR registers
+v0..v8 while `CheckStoreBeforeCall` admits v8..v15, so neither predicate
+contains the other: swapping them would drop v0..v7 from drvd_rmp and lose PHIs
+that are wanted today. Widening keeps every register the old line admitted and
+adds exactly those the store loop can ask for, so the change is additive and
+cannot remove a PHI that already existed.
+
+diff --git a/backend/remill/lib/BC/VroTraceLifter.cpp b/backend/remill/lib/BC/VroTraceLifter.cpp
+--- a/backend/remill/lib/BC/VroTraceLifter.cpp
++++ b/backend/remill/lib/BC/VroTraceLifter.cpp
+@@ -572,8 +572,17 @@
+     auto &pres_str_rmp = t_bag->pres_str_rmp;
+     auto &drvd_rmp = t_bag->drvd_rmp;
+
+     for (auto &[er1, erc1] : pres_str_rmp) {
+-      if (er1.CheckPassedArgsRegs()) {
++      // The UNION of the two predicates, because neither contains the other:
++      // CheckPassedArgsRegs takes vector regs v0..v8, CheckStoreBeforeCall
++      // takes v8..v15. Dropping either side loses PHIs that are wanted.
++      //
++      // CheckStoreBeforeCall is the one that matters here: the store-before-call
++      // loop in OptimizeVirtualRegsUsage reads exactly those registers out of
++      // cur_r_inst_mp with `.at()`, and cur_r_inst_mp is seeded from drvd_rmp.
++      // Leaving them out makes that `.at()` throw std::out_of_range -- which is
++      // what 0007 did when it widened the store sites but not this line.
++      if (er1.CheckPassedArgsRegs() || er1.CheckStoreBeforeCall()) {
+         drvd_rmp.insert({er1, erc1});
+       }
+     }

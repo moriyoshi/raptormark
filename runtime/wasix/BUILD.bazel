@@ -1,0 +1,37 @@
+# ecvisor for wasmer: WASIX sockets plus the WASIX loader.
+# `link-all --profile wasix`.
+#
+# ⚠️ NEVER A DEFAULT. The archive imports the `wasix_32v1` namespace, which only
+# wasmer supplies; a module carrying it fails to instantiate anywhere else.
+# `//runtime:loader_exclusion_test` and `//runtime:profile_exclusion_test` keep
+# both halves of it out of the shipping archive.
+#
+# ⚠️ IT ALSO NEEDS `wasmer run --net`. Without that flag `sock_open` SUCCEEDS
+# and `sock_bind` returns errno 58, so nothing reports a problem until the first
+# bind. `internal/pipeline.runtimeArgs` passes it; a hand-rolled invocation must
+# too.
+#
+# ❗ THE TWO HALVES ARE AT DIFFERENT STAGES, and the archive does not say so.
+#   * The SOCKETS work. This is the first profile other than the default with
+#     real external egress -- loopback is in-process only, browser needs a relay
+#     server that does not exist.
+#   * The LOADER does not, yet. WASIX refuses `dlopen` from an instance that is
+#     not a dynamic library, so `--profile wasix` still answers errno 79 to
+#     every `dlopen`. Making the SUPERVISOR one needs a PIC Rust std (nightly +
+#     `rust-src` + `-Z build-std`), which the user deferred on 2026-08-24.
+#     Its side modules already load; see `.agents/docs/TODO.md`.
+#
+# ⚠️ ITS NET BACKEND WAS `net-loopback` UNTIL WASIX SOCKETS EXISTED, and
+# `loader_exclusion_test`'s attribution argument used to rest on that -- wasix
+# and loopback differed only in the loader, so a symbol in one and not the other
+# had to be the loader's. It now differs in both. The test's control moved with
+# it rather than being dropped: see the WASIX ATTRIBUTION block there.
+
+load("//bazel:ecvisor.bzl", "ecvisor_profile")
+
+package(default_visibility = ["//visibility:public"])
+
+ecvisor_profile(
+    feature = "net-wasix",
+    extra_features = ["load-wasix"],
+)

@@ -1,0 +1,34 @@
+FMOV (vector, immediate), 2D: read the immediate from abcdefgh, not imm8.
+
+Patch 0010 added `TryDecodeFMOV_ASIMDIMM_D2_D` using `data.imm8.uimm`. That is
+the SCALAR FMOV immediate field. The vector ASIMDIMM format splits the immediate
+across bits [18:16] (abc) and [9:5] (defgh), which `ConcatABCDEFGHToU8` extracts
+and which every other ASIMDIMM decoder in this file uses.
+
+❗ THIS IS A SILENT WRONG VALUE, NOT A CRASH. The instruction decodes, lifts and
+runs; it just produces the wrong constant. Measured with a guest that executes
+`fmov v2.2d, #1.0` and prints the result:
+
+    native:         FMOV2D=OK(1.0)
+    under ecvisor:  FMOV2D=BAD(2.0)
+
+It has been wrong since patch 0010 landed, and nothing noticed because the only
+symptom is a floating-point constant that is off by an exponent bit.
+
+Found while validating patch 0070, which introduced the identical mistake by
+copying this line. The S form was caught the same way -- by running a guest and
+diffing against native -- which is the only reason either was found: both decode
+cleanly, so no `[ecv-undecoded]` line and no `_ecv_unreached` ever appears.
+
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7547,7 +7547,8 @@
+ bool TryDecodeFMOV_ASIMDIMM_D2_D(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+   AddRegOperand(inst, kActionWrite, kReg2D, kUseAsValue, data.Rd);
+-  AddImmOperand(inst, VFPExpandImmToFloat64(data.imm8.uimm));
++  // ❗ ConcatABCDEFGHToU8, not data.imm8.uimm -- see the S_S form above.
++  AddImmOperand(inst, VFPExpandImmToFloat64(ConcatABCDEFGHToU8(data)));
+   return true;
+ }
+ 

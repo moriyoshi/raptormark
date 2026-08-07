@@ -1,0 +1,73 @@
+# raptormark under Bazel.
+#
+# WHAT THIS OWNS, and what it deliberately does not.
+#
+# It owns the artifacts raptormark itself builds and used to build with `RUN`
+# lines in `builder/Dockerfile`: the four LLVM companion tools, the two C shims,
+# and the three ecvisor profiles.
+#
+# It does NOT own `third_party/elfconv`. That is a pinned submodule with its own
+# Dockerfile and CMake build of LLVM 16, remill and `elflift`, and CLAUDE.md
+# forbids working-tree edits to it. The elfconv base image and the patched base
+# (the 65-patch series in `patches/`) stay Docker-built and stay the input to
+# everything here. `raptormark build-image` still produces them.
+#
+# The seam is therefore: Docker produces the TOOLCHAIN, Bazel produces the
+# ARTIFACTS, and the builder image is assembled from both.
+module(
+    name = "raptormark",
+    version = "0.1.0",
+)
+
+# `sh_test` is not a native rule in Bazel 9.
+bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+# ── Rust ────────────────────────────────────────────────────────────────────
+# The base image has NO Rust: builder/Dockerfile's first RUN was a
+# `curl https://sh.rustup.rs | sh`. Bazel supplying the toolchain is therefore
+# not a stylistic preference here, it is what lets that RUN line be deleted --
+# and it replaces a piped shell installer with a version-pinned, hash-verified
+# download.
+#
+# 1.88.0 is the version that RUN line pinned.
+bazel_dep(name = "rules_rust", version = "0.73.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    extra_target_triples = ["wasm32-wasip1"],
+    versions = ["1.88.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# miniz_oxide + adler2, by the hashes already in runtime/Cargo.lock.
+crates = use_extension("//bazel:crates.bzl", "crates")
+use_repo(crates, "crate_adler2", "crate_miniz_oxide")
+
+# ── Go ──────────────────────────────────────────────────────────────────────
+# `raptormark` (the host CLI) and `raptormark-builder-tools` (translate-one /
+# link-all, which run INSIDE the builder image).
+#
+# The second one is why this is here rather than left on `go build`. CLAUDE.md
+# records that a raw `docker build` does not rebuild it -- builder/Dockerfile
+# COPYs a prebuilt host binary -- and that this cost a whole void gate on
+# 2026-08-18, when a -fPIC change never reached the image while every label said
+# it had. A Bazel dependency edge from the image to the binary is what makes
+# that class of mistake unrepresentable.
+bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "gazelle", version = "0.53.0")
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(version = "1.26.0")
+
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//:go.mod")
+use_repo(go_deps, "com_github_alecthomas_kong", "cc_mvdan_sh_v3")
+
+# LLVM 16 + wasi-sdk. Two sources, `image` (default) and `hermetic`; see
+# //bazel:sdk.bzl for why the choice exists and what each one proves.
+sdk = use_extension("//bazel:sdk.bzl", "sdk")
+use_repo(sdk, "raptormark_sdk")

@@ -1,0 +1,200 @@
+diff --git a/backend/remill/include/remill/BC/TraceLifter.h b/backend/remill/include/remill/BC/TraceLifter.h
+--- a/backend/remill/include/remill/BC/TraceLifter.h
++++ b/backend/remill/include/remill/BC/TraceLifter.h
+@@ -27,6 +27,7 @@
+ #include <queue>
+ #include <tuple>
+ #include <unordered_map>
++#include <unordered_set>
+ 
+ namespace remill {
+ 
+@@ -95,6 +96,29 @@
+   // at address `addr` is executable and readable, and updates the byte
+   // pointed to by `byte` with the read value.
+   virtual bool TryReadExecutableByte(uint64_t addr, uint8_t *byte) = 0;
++
++  // Reads the 4-byte instruction word at `addr`.
++  //
++  // The scan loops below read four separate bytes per 4-byte slot, and on a
++  // non-BTI binary they run to the 512 KiB `kFuncCap` for every function with an
++  // indirect branch (measured: busybox has 0 `bti c` markers in 268,891
++  // instructions, bash 26 in 524,416). That made byte reads 70% of the lift
++  // before patches/0038 and 17.6% after. One lookup per word instead of four is
++  // a pure read optimisation -- same bytes, same decisions.
++  //
++  // The default is exactly the four byte reads it replaces, so a manager that
++  // cannot do better, or a word straddling two sections, behaves identically.
++  virtual bool TryReadExecutableWord32(uint64_t addr, uint32_t *word) {
++    uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
++    if (!TryReadExecutableByte(addr, &b0) || !TryReadExecutableByte(addr + 1, &b1) ||
++        !TryReadExecutableByte(addr + 2, &b2) || !TryReadExecutableByte(addr + 3, &b3)) {
++      return false;
++    }
++    *word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
++            (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
++    return true;
++  }
++
+   /* get vma end address of the target function */
+   virtual uint64_t GetFuncVMA_E(uint64_t vma_s) = 0;
+ 
+@@ -393,6 +417,12 @@
+   std::vector<llvm::Constant *> bb_addrs, bb_addr_vmas;
+   BBRegInfoNode *bb_reg_info_node;
+   std::map<uint64_t, llvm::BasicBlock *> lifted_block_map;
++  // Membership mirror of lifted_block_map's keys. lifted_block_map must stay
++  // ORDERED because GenIndirectJumpCode iterates it to add indirectbr
++  // destinations, so its order reaches the emitted IR -- but the scan loops
++  // only ask whether a pc is present, once per 4-byte slot across a 512 KiB
++  // range. This answers that in O(1) while the map keeps the ordering.
++  std::unordered_set<uint64_t> lifted_block_pcs;
+   std::map<llvm::BasicBlock *, uint64_t> rev_lifted_block_map;
+   std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> br_blocks;
+   bool lift_all_insn;
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -221,7 +221,7 @@
+   auto &block = blocks[block_pc];
+   if (!block)
+     block = llvm::BasicBlock::Create(context, "", func);
+-  if (lifted_block_map.count(block_pc) == 0) {
++  if (lifted_block_pcs.insert(block_pc).second) {
+     lifted_block_map[block_pc] = block;
+     rev_lifted_block_map[block] = block_pc;
+   }
+@@ -408,6 +408,7 @@
+     br_bb = nullptr;
+     lifted_block_map.clear();
+     rev_lifted_block_map.clear();
++    lifted_block_pcs.clear();
+     lift_all_insn = false;
+     far_jump_bb = nullptr;
+     _near_jump_bb = nullptr;
+@@ -1079,19 +1080,14 @@
+       size_t seeded = 0;
+       for (uint64_t insn_vma = trace_addr + 4;
+            insn_vma < trace_addr + kFuncCap && seeded < kMaxSeed; insn_vma += 4) {
+-        uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+-        if (!manager.TryReadExecutableByte(insn_vma, &b0) ||
+-            !manager.TryReadExecutableByte(insn_vma + 1, &b1) ||
+-            !manager.TryReadExecutableByte(insn_vma + 2, &b2) ||
+-            !manager.TryReadExecutableByte(insn_vma + 3, &b3)) {
++        uint32_t word = 0;
++        if (!manager.TryReadExecutableWord32(insn_vma, &word)) {
+           break;  // ran off executable memory
+         }
+-        uint32_t word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
+-                        (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
+         if (word == 0xD503245FU) {
+           break;  // next function entry (bti c) -- stop before crossing into it
+         }
+-        if (lifted_block_map.count(insn_vma) != 0) {
++        if (lifted_block_pcs.count(insn_vma) != 0) {
+           continue;
+         }
+         if (word == 0xD503249FU || word == 0xD50324DFU) {  // bti j / bti jc
+@@ -1121,15 +1117,9 @@
+       // fallback to NON-branch-protected functions: gate on the entry NOT being a landing pad.
+       // postgres is PAC+BTI (every entry a pad) -> byte-identical to pre-orphan; listdir/
+       // personality are non-BTI (ordinary entries) -> the vfprintf fix is preserved.
+-      uint8_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;
+-      const bool entry_read = manager.TryReadExecutableByte(trace_addr, &e0) &&
+-                              manager.TryReadExecutableByte(trace_addr + 1, &e1) &&
+-                              manager.TryReadExecutableByte(trace_addr + 2, &e2) &&
+-                              manager.TryReadExecutableByte(trace_addr + 3, &e3);
+-      const uint32_t entry_word =
+-          entry_read ? (static_cast<uint32_t>(e0) | (static_cast<uint32_t>(e1) << 8) |
+-                        (static_cast<uint32_t>(e2) << 16) | (static_cast<uint32_t>(e3) << 24))
+-                     : 0;
++      uint32_t entry_word_raw = 0;
++      const bool entry_read = manager.TryReadExecutableWord32(trace_addr, &entry_word_raw);
++      const uint32_t entry_word = entry_read ? entry_word_raw : 0;
+       const bool entry_is_landing_pad =
+           entry_word == 0xD503245FU ||  // bti c
+           entry_word == 0xD50324DFU ||  // bti jc
+@@ -1165,7 +1155,7 @@
+         if (func_end > trace_addr) {
+           for (uint64_t insn_vma = trace_addr; insn_vma < func_end && seeded < kMaxSeed;
+                insn_vma += 4) {
+-            if (lifted_block_map.count(insn_vma) == 0) {
++            if (lifted_block_pcs.count(insn_vma) == 0) {
+               inst_work_list.insert(insn_vma);
+               ++seeded;
+             }
+@@ -1188,22 +1178,17 @@
+               entry_word;  // function entry instruction (never an unconditional xfer)
+           for (uint64_t insn_vma = trace_addr + 4; insn_vma <= max_lifted && seeded < kMaxSeed;
+                insn_vma += 4) {
+-            uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+-            if (!manager.TryReadExecutableByte(insn_vma, &b0) ||
+-                !manager.TryReadExecutableByte(insn_vma + 1, &b1) ||
+-                !manager.TryReadExecutableByte(insn_vma + 2, &b2) ||
+-                !manager.TryReadExecutableByte(insn_vma + 3, &b3)) {
++            uint32_t word = 0;
++            if (!manager.TryReadExecutableWord32(insn_vma, &word)) {
+               break;  // ran off executable memory
+             }
+-            uint32_t word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
+-                            (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
+             if (word == 0xD503245FU) {
+               break;  // next function entry (bti c)
+             }
+             bool prev_uncond = (prev_word & 0xFC000000U) == 0x14000000U ||  // b (not bl=0x94...)
+                                (prev_word & 0xFFFFFC1FU) == 0xD61F0000U ||  // br (branch to reg)
+                                (prev_word & 0xFFFFFC1FU) == 0xD65F0000U;    // ret
+-            if (prev_uncond && lifted_block_map.count(insn_vma) == 0) {
++            if (prev_uncond && lifted_block_pcs.count(insn_vma) == 0) {
+               inst_work_list.insert(insn_vma);
+               ++seeded;
+             }
+diff --git a/lifter/TraceManager.h b/lifter/TraceManager.h
+--- a/lifter/TraceManager.h
++++ b/lifter/TraceManager.h
+@@ -47,6 +47,7 @@
+   llvm::Function *GetLiftedTraceDeclaration(uint64_t addr);
+   llvm::Function *GetLiftedTraceDefinition(uint64_t addr);
+   bool TryReadExecutableByte(uint64_t addr, uint8_t *byte);
++  bool TryReadExecutableWord32(uint64_t addr, uint32_t *word) override;
+   std::string GetLiftedFuncName(uint64_t addr);
+   std::string GetUniqueLiftedFuncName(std::string func_name, uint64_t vma_s);
+   bool isFunctionEntry(uint64_t addr);
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -86,6 +86,34 @@
+   return GetLiftedTraceDeclaration(addr);
+ }
+ 
++bool AArch64TraceManager::TryReadExecutableWord32(uint64_t addr, uint32_t *word) {
++  // Fast path: all four bytes inside one section, so one range check serves the
++  // whole word. A word straddling two sections falls back to the base's
++  // byte-at-a-time read, which is what the callers did before.
++  if (last_code_range < code_ranges.size()) {
++    const auto &r = code_ranges[last_code_range];
++    if (addr >= r.vma && addr + 4 <= r.vma + r.size) {
++      const uint8_t *p = r.bytes + (addr - r.vma);
++      *word = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
++              (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
++      return true;
++    }
++  }
++  auto it = std::upper_bound(code_ranges.begin(), code_ranges.end(), addr,
++                             [](uint64_t a, const CodeRange &r) { return a < r.vma; });
++  if (it != code_ranges.begin()) {
++    --it;
++    if (addr >= it->vma && addr + 4 <= it->vma + it->size) {
++      last_code_range = static_cast<size_t>(it - code_ranges.begin());
++      const uint8_t *p = it->bytes + (addr - it->vma);
++      *word = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
++              (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
++      return true;
++    }
++  }
++  return TraceManager::TryReadExecutableWord32(addr, word);
++}
++
+ bool AArch64TraceManager::TryReadExecutableByte(uint64_t addr, uint8_t *byte) {
+ 
+   // Consecutive reads land in the same section almost every time, so try the

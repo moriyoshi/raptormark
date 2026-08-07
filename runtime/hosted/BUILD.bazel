@@ -1,0 +1,39 @@
+# ecvisor with the HOSTED loader backend: `link-all --profile hosted`.
+#
+# ⚠️ THIS IS NOT A DEFAULT AND MUST NEVER BECOME ONE. The archive carries
+# `env.ecv_host_load_side`, an import no stock runwasi shim supplies, so a
+# module linked against it fails to INSTANTIATE before running an instruction.
+# It is staged into the image beside loopback and browser so an embedder that
+# DOES supply that import can select it; `//runtime:loader_exclusion_test`
+# checks that it stays out of the shipping archive.
+#
+# ⚠️ Its net backend is LOOPBACK, and that pairing is forced rather than chosen.
+# A mid-run load needs the guest to yield so the host can instantiate and then
+# call `ecv_side_loaded`; only the re-entrant surface (`ecv_boot` /
+# `ecv_run_slice`) can do that, and `internal/builder/linkall.go` puts that
+# surface on non-default profiles only. So a wasmedge-based hosted profile could
+# not have worked. Loopback over browser because it imports no socket function
+# at all, so an embedder need not supply a socket ABI to exercise a loader.
+#
+# A separate package for the same reason `//runtime/loopback` and
+# `//runtime/browser` are: every profile's archive must be called
+# `libecvisor.a`, and several targets producing one filename in one package is
+# a conflicting-action error.
+
+load("//bazel:ecvisor.bzl", "ecvisor_profile")
+
+package(default_visibility = ["//visibility:public"])
+
+ecvisor_profile(
+    # ⚠️ ATTRIBUTION NOTE, because this used to be `net-wasmedge` for it.
+    #
+    # This archive once used the shipping net backend so that it differed from
+    # `//runtime:ecvisor_wasm` in the LOADER and nothing else, making any symbol
+    # present in one and absent in the other attributable to the loader. It now
+    # differs in both, so `loader_exclusion_test.sh` compares it against
+    # `//runtime/loopback` -- same net backend, no `load-hosted` -- which
+    # restores that property exactly and against a target that has to exist
+    # anyway.
+    feature = "net-loopback",
+    extra_features = ["load-hosted"],
+)

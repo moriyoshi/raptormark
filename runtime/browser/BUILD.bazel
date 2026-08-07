@@ -1,0 +1,7 @@
+# ecvisor with `net-browser`: the `raptormark_net_v1` import module, whose
+# `wait` NEVER blocks -- a browser host cannot be blocked, so the scheduler
+# returns `Idle` and the host resumes it. See runtime/src/net/browser.rs.
+
+load("//bazel:ecvisor.bzl", "ecvisor_profile")
+
+ecvisor_profile(feature = "net-browser")

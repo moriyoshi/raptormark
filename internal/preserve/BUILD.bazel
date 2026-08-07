@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "preserve",
+    srcs = [
+        "cmd.go",
+        "preserve.go",
+    ],
+    importpath = "raptormark/internal/preserve",
+    visibility = ["//:__subpackages__"],
+)
+
+# Runs under Bazel, unlike //internal/builder and //internal/rootfs which are
+# tagged `manual`: this package needs no Docker, no `go` on PATH and no repo
+# tree. `Check` takes its image resolver as a parameter for exactly that reason.
+go_test(
+    name = "preserve_test",
+    srcs = ["preserve_test.go"],
+    embed = [":preserve"],
+)

@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "serve",
+    srcs = [
+        "cmd.go",
+        "serve.go",
+    ],
+    importpath = "raptormark/internal/serve",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/relay"],
+)
+
+go_test(
+    name = "serve_test",
+    srcs = ["serve_test.go"],
+    embed = [":serve"],
+)

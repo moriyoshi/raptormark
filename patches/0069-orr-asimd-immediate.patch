@@ -1,0 +1,128 @@
+ORR (vector, immediate): implement the two ASIMDIMM forms.
+
+`TryDecodeORR_ASIMDIMM_L_HL` and `_L_SL` were generated stubs returning false, so
+every `ORR <Vd>.<T>, #<imm8>{, LSL #<amount>}` reached `_ecv_unreached`.
+
+⭐ This is the first lifter target in this tree proven reachable by RUNNING
+rather than by static inventory. Guest 0x87ab18 in `ruby-glibc.fused`, encoding
+`0f04141c` = `orr v28.2s, #0x80`, inside `proc_options` immediately after a
+`strncmp(arg, "yjit", 4)`: it is the vectorised
+`FEATURE_SET(opt->features, FEATURE_BIT(yjit))`, so every `--yjit*` spelling
+SIGILLs with `[BUG] Illegal instruction`, exit 127.
+
+The implementation is BIC's, with `|` instead of `& ~`. That is not a shortcut:
+`BIC (vector, immediate)` and `ORR (vector, immediate)` share an encoding shape,
+an arrangement specifier, and an immediate construction, and differ only in the
+operation applied. The decoders are therefore byte-identical to BIC's and only
+DATAXFER.cpp distinguishes them -- which is also why the stubs were the whole of
+what was missing.
+
+Three files, following the convention the existing patches use:
+  * Decode.cpp   -- drop the two stubs (an implemented decoder lives in Arch.cpp)
+  * Arch.cpp     -- the two real decoders, beside BIC's
+  * DATAXFER.cpp -- ORR_L_HL / ORR_L_SL semantics and the four ISELs
+
+⚠️ This unblocks ruby's argv parsing ONLY, not YJIT. The second wall behind it is
+an address budget -- a 128 MiB reservation into a 96 MiB window -- which no
+decoder patch touches. Implementing this makes `ruby --yjit` reach a DIFFERENT
+fatal error, which is progress in knowledge rather than in capability.
+
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -17326,9 +17326,6 @@
+ //  30 x Q        0
+ //  31 0
+ // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
+-bool TryDecodeORR_ASIMDIMM_L_HL(const InstData &, Instruction &) {
+-  return false;
+-}
+ 
+ // ORR ORR_asimdimm_L_sl:
+ //   0 x Rd       0
+@@ -17364,9 +17361,6 @@
+ //  30 x Q        0
+ //  31 0
+ // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
+-bool TryDecodeORR_ASIMDIMM_L_SL(const InstData &, Instruction &) {
+-  return false;
+-}
+ 
+ // FCVTAU FCVTAU_32H_float2int:
+ //   0 x Rd       0
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -6447,6 +6447,31 @@
+ }
+ 
+ // BIC  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++// ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++//
++// Mirrors BIC_ASIMDIMM_L_HL below exactly -- same operand shape, same
++// arrangement specifier, same immediate construction. The two instructions
++// differ only in the operation the semantics applies, which is why the decoders
++// are identical and only DATAXFER.cpp tells them apart.
++bool TryDecodeORR_ASIMDIMM_L_HL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddQArrangementSpecifier(data, inst, "8H", "4H");
++  AddRegOperand(inst, kActionReadWrite, data.Q ? kReg8H : kReg4H, kUseAsValue, data.Rd);
++  uint64_t shift = (data.cmode & 0b10) ? 8 : 0;
++  AddImmOperand(inst, ConcatABCDEFGHToU8(data) << shift, kUnsigned, 16);
++  return true;
++}
++
++// ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++bool TryDecodeORR_ASIMDIMM_L_SL(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddQArrangementSpecifier(data, inst, "4S", "2S");
++  AddRegOperand(inst, kActionReadWrite, data.Q ? kReg4S : kReg2S, kUseAsValue, data.Rd);
++  uint64_t shift = 8 * ((data.cmode >> 1) & 0b11);
++  AddImmOperand(inst, ConcatABCDEFGHToU8(data) << shift, kUnsigned, 32);
++  return true;
++}
++
+ bool TryDecodeBIC_ASIMDIMM_L_HL(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+   AddQArrangementSpecifier(data, inst, "8H", "4H");
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1816,6 +1816,28 @@
+ }
+ 
+ template <typename V>
++DEF_SEM_T(ORR_L_HL, V dst_src, I16 src) {
++  auto imm = Read(src);
++  auto src_vec = UReadVI16(dst_src);
++  V res = {};
++  _Pragma("unroll") for (int i = 0; i < GetVectorElemsNum(res); i++) {
++    res[i] = src_vec[i] | imm;
++  }
++  return res;
++}
++
++template <typename V>
++DEF_SEM_T(ORR_L_SL, V dst_src, I32 src) {
++  auto imm = Read(src);
++  auto src_vec = UReadVI32(dst_src);
++  V res = {};
++  _Pragma("unroll") for (int i = 0; i < GetVectorElemsNum(res); i++) {
++    res[i] = src_vec[i] | imm;
++  }
++  return res;
++}
++
++template <typename V>
+ DEF_SEM_T(BIC_L_HL, V dst_src, I16 src) {
+   auto imm = Read(src);
+   auto src_vec = UReadVI16(dst_src);
+@@ -1857,6 +1879,11 @@
+ DEF_ISEL(MVNI_ASIMDIMM_M_SM_2S) = MOVI_L_SL<VIu32v2>;  // MOVI  <Vd>.<T>, #<imm8>, MSL #<amount>
+ DEF_ISEL(MVNI_ASIMDIMM_M_SM_4S) = MOVI_L_SL<VIu32v4>;  // MOVI  <Vd>.<T>, #<imm8>, MSL #<amount>
+ 
++DEF_ISEL(ORR_ASIMDIMM_L_HL_4H) = ORR_L_HL<VIu16v4>;  // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++DEF_ISEL(ORR_ASIMDIMM_L_HL_8H) = ORR_L_HL<VIu16v8>;  // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++DEF_ISEL(ORR_ASIMDIMM_L_SL_2S) = ORR_L_SL<VIu32v2>;  // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++DEF_ISEL(ORR_ASIMDIMM_L_SL_4S) = ORR_L_SL<VIu32v4>;  // ORR  <Vd>.<T>, #<imm8>{, LSL #<amount>}
++
+ DEF_ISEL(BIC_ASIMDIMM_L_HL_4H) = BIC_L_HL<VIu16v4>;  // BIC  <Vd>.<T>, #<imm8>{, LSL #<amount>}
+ DEF_ISEL(BIC_ASIMDIMM_L_HL_8H) = BIC_L_HL<VIu16v8>;  // BIC  <Vd>.<T>, #<imm8>{, LSL #<amount>}
+ DEF_ISEL(BIC_ASIMDIMM_L_SL_2S) = BIC_L_SL<VIu32v2>;  // BIC  <Vd>.<T>, #<imm8>{, LSL #<amount>}

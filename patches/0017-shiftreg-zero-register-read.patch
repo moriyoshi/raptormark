@@ -1,0 +1,25 @@
+diff --git a/backend/remill/lib/BC/InstructionLifter.cpp b/backend/remill/lib/BC/InstructionLifter.cpp
+index 9fe102c..cf0ab63 100644
+--- a/backend/remill/lib/BC/InstructionLifter.cpp
++++ b/backend/remill/lib/BC/InstructionLifter.cpp
+@@ -403,7 +403,19 @@ llvm::Value *InstructionLifter::LiftShiftRegisterOperand(Instruction &inst, llvm
+                                  << "for instruction at " << std::hex << inst.pc;
+ 
+   const llvm::DataLayout data_layout(module);
+-  auto reg = LoadRegValue(block, state_ptr, arch_reg.name);
++  // raptormark: the zero register has no slot in `State`, so asking for its
++  // address is fatal (`LoadRegAddress`: "This point must not be reached ...
++  // reg_name: XZR"). `LiftRegisterOperand` already substitutes a constant for
++  // XZR/WZR, but this path went straight to `LoadRegValue`, so *any* shifted-
++  // register operand naming the zero register aborted the entire lift rather
++  // than the one instruction. Reads of XZR/WZR are architecturally zero.
++  llvm::Value *reg = nullptr;
++  if (31 == arch_reg.number && ("XZR" == arch_reg.name || "WZR" == arch_reg.name)) {
++    reg = llvm::ConstantInt::get(
++        llvm::Type::getIntNTy(context, "XZR" == arch_reg.name ? 64 : 32), 0);
++  } else {
++    reg = LoadRegValue(block, state_ptr, arch_reg.name);
++  }
+   auto reg_type = reg->getType();
+   auto reg_size = data_layout.getTypeSizeInBits(reg_type).getFixedValue();
+   auto op_type = llvm::Type::getIntNTy(context, op.size);

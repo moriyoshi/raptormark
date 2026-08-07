@@ -1,0 +1,113 @@
+Let the suspend check go back to a CALL, under an env gate.
+
+Patch 0059 replaced the `_ecv_suspended` call after every guest call and syscall
+with a read of the `__ecv_unwinding` WASM GLOBAL, because that read is one
+`global.get` where the call was a call -- 33,540 sites on a linked bash module.
+That is the right default and stays the default.
+
+It is also the one thing that stops WASIX loading a raptormark side module.
+Measured against wasmer 7.3.0 (see .agents/docs/JOURNAL.md, 2026-08-24):
+
+    $ wasmer run --mapdir /libs:libs host.wat
+    failed to load module: Expected import to be a function: 'env'.__ecv_unwinding
+
+WASIX's dynamic linker requires every `env` import to be a FUNCTION. Our side
+modules import four globals; wasmer supplies the three standard PIC ones
+(`__stack_pointer`, `__memory_base`, `__table_base`) itself and rejects ours.
+A library of the identical shape, with `_ecv_suspended` imported as a FUNCTION
+instead, loads with rc=0 -- so this single import is the whole difference.
+
+`ECV_SUSPEND_VIA_CALL=1` restores the pre-0059 call form. Nothing else changes:
+`_ecv_suspended` is still defined (ecvisor's `runtime/src/intrinsics.rs` returns
+`context::unwinding()`, the same value the global holds; elfconv's own
+`runtime/VmIntrinsics.cpp` returns 0 for the same reason it did before 0059), so
+the two forms are semantically identical and differ only in cost.
+
+⚠️ READ ONCE into a static. This runs at every suspend-check site, and a
+`getenv` per site would be measurable on a lift that emits tens of thousands.
+
+⚠️ DECLARE THE FUNCTION IF IT IS ABSENT. After 0059 nothing else references
+`_ecv_suspended`, so the module it is lifted into may no longer carry a
+declaration, and `module->getFunction` would return null -- the pre-0059 code
+could assume it because the call site itself was the reference. The parameter
+type is taken from `runtime_ptr` rather than written out, so this cannot drift
+from whatever the caller actually holds.
+
+--- a/backend/remill/include/remill/BC/TraceLifter.h
++++ b/backend/remill/include/remill/BC/TraceLifter.h
+@@ -435,6 +435,10 @@
+   // The `__ecv_unwinding` wasm global (address space 1) the suspend check reads,
+   // in place of calling `_ecv_suspended`. Declared into the module on first use.
+   llvm::GlobalVariable *GetOrCreateUnwindingGlobal();
++  // `_ecv_suspended`, for the ECV_SUSPEND_VIA_CALL form (patch 0067). Declared
++  // into the module on first use: after 0059 nothing else references it, so the
++  // declaration is not guaranteed to be there.
++  llvm::Function *GetOrDeclareSuspendedFn(llvm::Value *runtime_ptr);
+ 
+   // Any i32 wasm global (address space 1) ecvisor's C shim defines. Declared
+   // into the module on first use.
+--- a/backend/remill/lib/BC/ForkEmulation.cpp
++++ b/backend/remill/lib/BC/ForkEmulation.cpp
+@@ -356,6 +356,34 @@
+   return join_bb;
+ }
+ 
++// Whether to emit the suspend check as a CALL to `_ecv_suspended` instead of a
++// read of the `__ecv_unwinding` wasm global.
++//
++// Off by default: the global read is why patch 0059 exists. It is turned on for
++// the `wasix` profile, whose loader refuses a module that imports a GLOBAL from
++// `env` -- see patch 0067's header.
++//
++// Read ONCE. There are tens of thousands of suspend-check sites in a real lift.
++static bool SuspendCheckViaCall() {
++  static const bool via_call = getenv("ECV_SUSPEND_VIA_CALL") != nullptr;
++  return via_call;
++}
++
++// `_ecv_suspended`, declared into this module if it is not already there.
++//
++// It usually is not: after 0059 the suspend check was its only caller, so the
++// declaration went with it. The parameter type comes from the value the caller
++// is about to pass, so this cannot disagree with the call it is built for.
++llvm::Function *TraceLifter::Impl::GetOrDeclareSuspendedFn(llvm::Value *runtime_ptr) {
++  static constexpr const char *kName = "_ecv_suspended";
++  if (auto *f = module->getFunction(kName)) {
++    return f;
++  }
++  auto *fty = llvm::FunctionType::get(llvm::Type::getInt8Ty(context),
++                                      {runtime_ptr->getType()}, /*isVarArg=*/false);
++  return llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage, kName, module);
++}
++
+ // Emit the suspend check that gets a blocked process back to the scheduler.
+ //
+ // The cooperative scheduler suspends a process inside a blocking syscall (or on
+@@ -382,12 +410,21 @@
+ 
+   llvm::IRBuilder<> ir(block);
+   auto i32ty = llvm::Type::getInt32Ty(context);
+-  // VOLATILE. The flag is written by the runtime from inside the very calls this
+-  // check guards, so a plain load is CSE bait: LLVM would happily reuse the value
+-  // it read before the call for the test after it, and the process would run on
+-  // instead of returning to the scheduler.
+-  auto flag = ir.CreateLoad(i32ty, GetOrCreateUnwindingGlobal(), /*isVolatile=*/true);
+-  auto cond = ir.CreateICmpNE(flag, llvm::ConstantInt::get(i32ty, 0));
++  llvm::Value *cond;
++  if (SuspendCheckViaCall()) {
++    // The pre-0059 form. A call is already a barrier, so it needs none of the
++    // volatility reasoning below -- LLVM cannot hoist the result of an opaque
++    // call across another call.
++    auto *flag = ir.CreateCall(GetOrDeclareSuspendedFn(runtime_ptr), {runtime_ptr});
++    cond = ir.CreateICmpNE(flag, llvm::ConstantInt::get(flag->getType(), 0));
++  } else {
++    // VOLATILE. The flag is written by the runtime from inside the very calls this
++    // check guards, so a plain load is CSE bait: LLVM would happily reuse the value
++    // it read before the call for the test after it, and the process would run on
++    // instead of returning to the scheduler.
++    auto flag = ir.CreateLoad(i32ty, GetOrCreateUnwindingGlobal(), /*isVolatile=*/true);
++    cond = ir.CreateICmpNE(flag, llvm::ConstantInt::get(i32ty, 0));
++  }
+   ConditionalBranchWithSaveParents(GetOrCreateSuspendRetBlock(), cont_bb, cond, block);
+   return cont_bb;
+ }

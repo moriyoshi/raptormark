@@ -1,0 +1,141 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+index 86cbd18..943299b 100644
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -865,15 +865,128 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+       }
+     }
+ 
+-    auto end_addr =
+-        lift_config.has_symtab ? manager.GetFuncVMA_E(trace_addr) : *addrset_in_func.begin();
+-    // auto end_addr = (uint64_t) std::min(manager.GetFuncVMA_E(trace_addr), *addrset_in_func.begin());
+-
+-    // if the func includes intraprocedural indirect jump instruction, it is necessary to lift all instructions of the func.
+-    if (br_bb && !lift_all_insn /* always be vrp_opt_mode || !vrp_opt_mode*/) {
+-      for (uint64_t insn_vma = trace_addr; insn_vma < end_addr; insn_vma += 4) {
+-        if (lifted_block_map.count(insn_vma) == 0) {
++    // Seed the block work-list with every BTI *jump* landing pad in this function
++    // that direct-branch discovery missed. A jump table / computed goto (a C
++    // switch, the bison parser's action table, hash_bytes's tail-length switch)
++    // reaches its case bodies through an indirect BR; upstream discovery follows
++    // only DIRECT branches, so those cases are never decoded. At runtime the
++    // indirect BR then misses the block-address map, hits the function catch-all
++    // far-jump, and re-dispatches the SAME pc forever, nesting a wasm shadow-stack
++    // frame each hop until it overflows (see JOURNAL "Blocker 4": create_scan_plan
++    // interior cases, hash_bytes tail switch at boot, base_yyparse's 2071 pads).
++    //
++    // AArch64 branch-protection marks every legal indirect-branch target with a
++    // BTI landing pad. `bti c` (0xD503245F) marks CALL targets -- i.e. function
++    // entries -- which direct discovery already finds; `bti j` (0xD503249F) and
++    // `bti jc` (0xD50324DF) mark JUMP targets -- exactly the switch cases we need.
++    // Scan the whole function -- [trace_addr, next `bti c`) -- and seed the jump
++    // pads not already lifted. Bounding by the NEXT function entry (`bti c`), not
++    // by the max decoded address, is what makes this both COMPLETE and SAFE: it
++    // catches cases in gaps of any size (base_yyparse's ~40KB action-table gap
++    // defeated an earlier fixed-gap heuristic) and trailing cases past the last
++    // decoded instruction (hash_bytes), while a far branch can no longer inflate
++    // the range and pull a neighbouring function in (which OOM-killed elflift and
++    // made clang grind for ~50min in earlier attempts). kFuncCap bounds the scan
++    // if no next `bti c` is found; kMaxSeed is a final runaway backstop.
++    // Unconditional, not gated on `br_bb`.
++    if (!lift_all_insn) {
++      constexpr uint64_t kFuncCap = 0x80000;  // 512 KiB: hard cap when no next bti c is seen
++      constexpr size_t kMaxSeed = 65536;      // backstop against a pathological run
++      size_t seeded = 0;
++      for (uint64_t insn_vma = trace_addr + 4;
++           insn_vma < trace_addr + kFuncCap && seeded < kMaxSeed; insn_vma += 4) {
++        uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
++        if (!manager.TryReadExecutableByte(insn_vma, &b0) ||
++            !manager.TryReadExecutableByte(insn_vma + 1, &b1) ||
++            !manager.TryReadExecutableByte(insn_vma + 2, &b2) ||
++            !manager.TryReadExecutableByte(insn_vma + 3, &b3)) {
++          break;  // ran off executable memory
++        }
++        uint32_t word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
++                        (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
++        if (word == 0xD503245FU) {
++          break;  // next function entry (bti c) -- stop before crossing into it
++        }
++        if (lifted_block_map.count(insn_vma) != 0) {
++          continue;
++        }
++        if (word == 0xD503249FU || word == 0xD50324DFU) {  // bti j / bti jc
+           inst_work_list.insert(insn_vma);
++          ++seeded;
++        }
++      }
++      // Fused non-BTI fallback. A branch-protected binary marks every jump-table case with
++      // `bti j`/`bti jc`, so the scan above resolves it. But `clang -static` against a NON-BTI
++      // libc (e.g. glibc `__vfprintf_internal`'s computed-goto table) leaves the cases
++      // UNMARKED -> the scan seeds nothing -> the indirect BR re-dispatches an unlifted case
++      // forever (shadow-stack overflow; see listdir/personality, JOURNAL 5bp). When this
++      // function HAS an indirect jump (`br_bb`) yet the BTI scan seeded NOTHING (`seeded == 0`
++      // -> a non-BTI jump table), fall back to ORPHAN-block seeding: an unlifted instruction
++      // whose predecessor is an unconditional, non-returning transfer (`b` / `br` / `ret`) is
++      // reachable ONLY by an indirect jump -- exactly a jump-table case. Gating on
++      // (br_bb && seeded == 0) keeps BTI binaries BYTE-IDENTICAL (they seed >0 pads, so this
++      // block is skipped) and bounds the fallback to the few non-BTI dispatch functions. This
++      // fuses the cheap "does this fn have an indirect jump" signal with orphan seeding, in
++      // lieu of reading the (often two-level, stack-based) offset table, which is fragile.
++      // Read the function-entry instruction. A BTI/PAC binary marks every function entry with
++      // a landing pad (`bti c` / `paciasp` / `pacibsp`). When such a function reaches here with
++      // seeded==0 its indirect BR is a TAIL CALL (any real jump-table pads were already seeded),
++      // NOT a non-BTI jump table -- orphan seeding would then wrongly pull post-tail-call
++      // padding/data into the trace and corrupt discovery (observed: it unlifted a query-path
++      // block in postgres -> runtime "no lifted instruction", JOURNAL 5bw). So restrict the
++      // fallback to NON-branch-protected functions: gate on the entry NOT being a landing pad.
++      // postgres is PAC+BTI (every entry a pad) -> byte-identical to pre-orphan; listdir/
++      // personality are non-BTI (ordinary entries) -> the vfprintf fix is preserved.
++      uint8_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;
++      const bool entry_read = manager.TryReadExecutableByte(trace_addr, &e0) &&
++                              manager.TryReadExecutableByte(trace_addr + 1, &e1) &&
++                              manager.TryReadExecutableByte(trace_addr + 2, &e2) &&
++                              manager.TryReadExecutableByte(trace_addr + 3, &e3);
++      const uint32_t entry_word =
++          entry_read ? (static_cast<uint32_t>(e0) | (static_cast<uint32_t>(e1) << 8) |
++                        (static_cast<uint32_t>(e2) << 16) | (static_cast<uint32_t>(e3) << 24))
++                     : 0;
++      const bool entry_is_landing_pad =
++          entry_word == 0xD503245FU ||  // bti c
++          entry_word == 0xD50324DFU ||  // bti jc
++          entry_word == 0xD503233FU ||  // paciasp
++          entry_word == 0xD503237FU;    // pacibsp
++      if (br_bb && seeded == 0 && entry_read && !entry_is_landing_pad) {
++        // Bound the orphan scan to the current function's DISCOVERED extent, not to
++        // `kFuncCap`/next `bti c`. A non-BTI binary has NO `bti c` markers, so the bti scan
++        // above ran to kFuncCap (512 KiB) crossing dozens of functions -- harmless there
++        // (it seeds nothing), but orphan seeding across that whole span would pull thousands
++        // of OTHER functions' blocks into this trace and explode compile time. `lifted_block_map`
++        // is per-trace (cleared at each trace, see top of loop), so its max key is THIS
++        // function's high-water mark; the jump-table cases we need are interleaved at or below
++        // it (e.g. vfprintf's 0x409edc sits amid blocks discovered above and below it).
++        uint64_t max_lifted = trace_addr;
++        for (const auto &kv : lifted_block_map)
++          if (static_cast<uint64_t>(kv.first) > max_lifted)
++            max_lifted = static_cast<uint64_t>(kv.first);
++        uint32_t prev_word = entry_word;  // function entry instruction (never an unconditional xfer)
++        for (uint64_t insn_vma = trace_addr + 4;
++             insn_vma <= max_lifted && seeded < kMaxSeed; insn_vma += 4) {
++          uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
++          if (!manager.TryReadExecutableByte(insn_vma, &b0) ||
++              !manager.TryReadExecutableByte(insn_vma + 1, &b1) ||
++              !manager.TryReadExecutableByte(insn_vma + 2, &b2) ||
++              !manager.TryReadExecutableByte(insn_vma + 3, &b3)) {
++            break;  // ran off executable memory
++          }
++          uint32_t word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
++                          (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
++          if (word == 0xD503245FU) {
++            break;  // next function entry (bti c)
++          }
++          bool prev_uncond = (prev_word & 0xFC000000U) == 0x14000000U ||  // b (not bl=0x94...)
++                             (prev_word & 0xFFFFFC1FU) == 0xD61F0000U ||  // br (branch to reg)
++                             (prev_word & 0xFFFFFC1FU) == 0xD65F0000U;    // ret
++          if (prev_uncond && lifted_block_map.count(insn_vma) == 0) {
++            inst_work_list.insert(insn_vma);
++            ++seeded;
++          }
++          prev_word = word;
+         }
+       }
+       lift_all_insn = true;
