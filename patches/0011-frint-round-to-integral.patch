@@ -1,0 +1,187 @@
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp	2026-07-26 15:54:53.000000000 +0900
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp	2026-07-26 17:44:16.115031274 +0900
+@@ -3494,6 +3494,46 @@
+   return true;
+ }
+ 
++// raptormark: scalar FRINT{P,Z,N,I} and FRINTA_S round-to-integral. The pinned
++// remill decoder stubs these to `return false` (FRINTM/FRINTA_D are upstream,
++// FRINTX is patch 0004); an undecoded one becomes an inline __ecv_warning -> fatal
++// when executed (hit e.g. as FRINTP in the query planner's btcostestimate cost
++// rounding). Decoding is identical to FRINTM; only the semantic rounding differs.
++#define ECV_DECODE_FRINT_SD(NAME) \
++  bool TryDecode##NAME##_S_FLOATDP1(const InstData &data, Instruction &inst) { \
++    inst.sema_func_arg_type = SemaFuncArgType::State; \
++    AddRegOperand(inst, kActionWrite, kRegS, kUseAsValue, data.Rd); \
++    AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn); \
++    if (inst.lift_config.float_exception_enabled) { \
++      AddArrangementSpecifierFPSRStatus(inst); \
++    } \
++    return true; \
++  } \
++  bool TryDecode##NAME##_D_FLOATDP1(const InstData &data, Instruction &inst) { \
++    inst.sema_func_arg_type = SemaFuncArgType::State; \
++    AddRegOperand(inst, kActionWrite, kRegD, kUseAsValue, data.Rd); \
++    AddRegOperand(inst, kActionRead, kRegD, kUseAsValue, data.Rn); \
++    if (inst.lift_config.float_exception_enabled) { \
++      AddArrangementSpecifierFPSRStatus(inst); \
++    } \
++    return true; \
++  }
++ECV_DECODE_FRINT_SD(FRINTP)
++ECV_DECODE_FRINT_SD(FRINTZ)
++ECV_DECODE_FRINT_SD(FRINTN)
++ECV_DECODE_FRINT_SD(FRINTI)
++#undef ECV_DECODE_FRINT_SD
++// FRINTA_D is upstream; only the S form is stubbed.
++bool TryDecodeFRINTA_S_FLOATDP1(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::State;
++  AddRegOperand(inst, kActionWrite, kRegS, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegS, kUseAsValue, data.Rn);
++  if (inst.lift_config.float_exception_enabled) {
++    AddArrangementSpecifierFPSRStatus(inst);
++  }
++  return true;
++}
++
+ // FRINTM  <Vd>.<T>, <Vn>.<T>
+ bool TryDecodeFRINTM_ASIMDMISC_R(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::State;
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp	2026-07-26 15:54:53.000000000 +0900
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp	2026-07-26 17:44:16.118964801 +0900
+@@ -11818,9 +11818,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTP  <Sd>, <Sn>
+-bool TryDecodeFRINTP_S_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTP_S_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // FRINTP FRINTP_D_floatdp1:
+ //   0 x Rd       0
+@@ -11856,9 +11854,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTP  <Dd>, <Dn>
+-bool TryDecodeFRINTP_D_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTP_D_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // WFE WFE_HI_system:
+ //   0 1 Rt       0
+@@ -16865,9 +16861,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTI  <Sd>, <Sn>
+-bool TryDecodeFRINTI_S_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTI_S_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // FRINTI FRINTI_D_floatdp1:
+ //   0 x Rd       0
+@@ -16903,9 +16897,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTI  <Dd>, <Dn>
+-bool TryDecodeFRINTI_D_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTI_D_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // FMADD FMADD_H_floatdp3:
+ //   0 x Rd       0
+@@ -17858,9 +17850,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTN  <Sd>, <Sn>
+-bool TryDecodeFRINTN_S_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTN_S_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // FRINTN FRINTN_D_floatdp1:
+ //   0 x Rd       0
+@@ -17896,9 +17886,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTN  <Dd>, <Dn>
+-bool TryDecodeFRINTN_D_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTN_D_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // ESB ESB_HI_system:
+ //   0 1 Rt       0
+@@ -19057,9 +19045,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTZ  <Sd>, <Sn>
+-bool TryDecodeFRINTZ_S_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTZ_S_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // FRINTZ FRINTZ_D_floatdp1:
+ //   0 x Rd       0
+@@ -19095,9 +19081,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTZ  <Dd>, <Dn>
+-bool TryDecodeFRINTZ_D_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTZ_D_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // SCVTF SCVTF_H32_float2fix:
+ //   0 x Rd       0
+@@ -33401,9 +33385,7 @@
+ //  30 0
+ //  31 0 M        0
+ // FRINTA  <Sd>, <Sn>
+-bool TryDecodeFRINTA_S_FLOATDP1(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTA_S_FLOATDP1 implemented in Arch.cpp (raptormark FRINT patch)
+ 
+ // FCSEL FCSEL_H_floatsel:
+ //   0 x Rd       0
+--- a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp	2026-07-25 13:27:18.000000000 +0900
++++ b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp	2026-07-26 17:44:16.115430519 +0900
+@@ -389,6 +389,34 @@
+ DEF_ISEL(FRINTX_D_FLOATDP1) = FRINTX_D;
+ DEF_ISEL(FRINTX_D_FLOATDP1_FPSRSTATUS) = FRINTX_D;
+ 
++// raptormark: scalar FRINT{P,Z,N,I} (S/D) + FRINTA_S round-to-integral. Modeled on
++// FRINTM (std::floor). WASM has round-to-nearest only, so ties-to-even (FRINTN/I)
++// use std::nearbyint (default FE_TONEAREST) and FRINTA uses std::round (ties away).
++namespace {
++DEF_SEM_F32_STATE(FRINTP_S, RF32 src) { return std::ceil(Read(src)); }
++DEF_SEM_F64_STATE(FRINTP_D, RF64 src) { return std::ceil(Read(src)); }
++DEF_SEM_F32_STATE(FRINTZ_S, RF32 src) { return std::trunc(Read(src)); }
++DEF_SEM_F64_STATE(FRINTZ_D, RF64 src) { return std::trunc(Read(src)); }
++DEF_SEM_F32_STATE(FRINTN_S, RF32 src) { return std::nearbyint(Read(src)); }
++DEF_SEM_F64_STATE(FRINTN_D, RF64 src) { return std::nearbyint(Read(src)); }
++DEF_SEM_F32_STATE(FRINTI_S, RF32 src) { return std::nearbyint(Read(src)); }
++DEF_SEM_F64_STATE(FRINTI_D, RF64 src) { return std::nearbyint(Read(src)); }
++DEF_SEM_F32_STATE(FRINTA_S, RF32 src) { return std::round(Read(src)); }
++}  // namespace
++#define ECV_ISEL_FRINT(NAME, T) \
++  DEF_ISEL(NAME##_##T##_FLOATDP1) = NAME##_##T; \
++  DEF_ISEL(NAME##_##T##_FLOATDP1_FPSRSTATUS) = NAME##_##T;
++ECV_ISEL_FRINT(FRINTP, S)
++ECV_ISEL_FRINT(FRINTP, D)
++ECV_ISEL_FRINT(FRINTZ, S)
++ECV_ISEL_FRINT(FRINTZ, D)
++ECV_ISEL_FRINT(FRINTN, S)
++ECV_ISEL_FRINT(FRINTN, D)
++ECV_ISEL_FRINT(FRINTI, S)
++ECV_ISEL_FRINT(FRINTI, D)
++ECV_ISEL_FRINT(FRINTA, S)
++#undef ECV_ISEL_FRINT
++
+ // FRINTM  <Vd>.<T>, <Vn>.<T>
+ namespace {
+ template <typename S>

@@ -1,0 +1,100 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "promise"],
+
+  // `correctness` is an ERROR because those rules found real dead code on the
+  // first run. The advisory categories are warnings, and `npm run lint` denies
+  // warnings too -- so the tree stays at zero output and a new finding is
+  // visible rather than lost in a backlog.
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+
+  "rules": {
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "typescript/no-explicit-any": "error",
+
+    // ⚠️ EVERY RULE BELOW IS OFF FOR A REASON, NOT FOR QUIET. Each one fired on
+    // this codebase and each one was wrong here; two of them would have
+    // introduced bugs if followed. Re-enable any of them only after reading why
+    // it is off.
+
+    // ⚠️ WOULD BREAK THE RE-ENTRANT DRIVER. `drive()` is a sequential loop whose
+    // `await macrotask()` / `await sleep()` ARE the mechanism that hands the
+    // event loop back between slices -- the thing the whole browser port exists
+    // to do. "Collect into `Promise.all` and run them in parallel" is not an
+    // optimisation here, it is a description of a hang: the guest would never
+    // yield, and the readiness it is waiting for is delivered by the very loop
+    // turn being skipped. Six sites, all deliberate.
+    "no-await-in-loop": "off",
+
+    // ⚠️ WOULD SILENTLY STOP MESSAGE DELIVERY. Assigning `port.onmessage`
+    // implicitly starts a `MessagePort`; `addEventListener('message', ...)` does
+    // NOT -- it needs an explicit `port.start()`. Following this rule without
+    // knowing that gives a service worker that registers, activates, and
+    // receives nothing.
+    "unicorn/prefer-add-event-listener": "off",
+
+    // A `targetOrigin` argument exists on `window.postMessage`. The call sites
+    // here are `MessagePort.postMessage` and `Client.postMessage`, whose second
+    // parameter is a TRANSFER LIST. The suggested fix does not typecheck.
+    "unicorn/require-post-message-target-origin": "off",
+
+    // Both sites sort an array that was just built -- `[...set].sort()` and a
+    // local accumulator -- so there is nothing to protect from mutation, and
+    // `toSorted()` would allocate a second array to avoid a hazard that is not
+    // present.
+    "unicorn/no-array-sort": "off",
+
+    // Same reasoning as `no-array-sort` above, and the same shape: the one call
+    // site is `[...queue].reverse()`, where the spread already made the copy.
+    "unicorn/no-array-reverse": "off",
+
+    // Fires on helpers defined inside a factory that runs once per host. The
+    // "recreated on every call" cost it warns about is one allocation per
+    // process, and hoisting them would separate them from the state they read.
+    "unicorn/consistent-function-scoping": "off",
+
+    // The two-argument `then(onFulfilled, onRejected)` in `deadline()` is a
+    // SUBSCRIPTION inside a `new Promise` executor: the handlers call
+    // `resolve`/`reject`, and returning from them would mean nothing. The rule
+    // is aimed at `then` chains, which this is not.
+    "promise/always-return": "off",
+
+    // Micro-optimisation on two `includes()` calls over a three-element array in
+    // a test assertion.
+    "unicorn/prefer-set-has": "off",
+
+    // `__ready`, `__error`, `__result`, `__signal` are a deliberate convention:
+    // they are the page globals `inbound.html` publishes for the browser tests
+    // to read, and the doubled underscore is what marks them as a test seam
+    // rather than page API. Renaming them would hide that.
+    "no-underscore-dangle": "off",
+
+    // The concatenation in `framing.test.ts` splits an HTTP/1.1 fixture into its
+    // head, its chunk and its terminator. One literal would be shorter and would
+    // make the wire format harder to read, which is the only thing that test is
+    // about.
+    "no-useless-concat": "off"
+  },
+
+  // ⚠️ `any` IS THE IDIOM AT THE PLAYWRIGHT BOUNDARY. A spec reaches page globals
+  // through `page.evaluate(() => (window as any).__ready)`, and the callback is
+  // compiled into the BROWSER, where this program's types do not exist. Declaring
+  // them would mean maintaining a second ambient declaration of the page's test
+  // seam for the benefit of a cast that is already checked by the assertion that
+  // follows it. Kept as an error everywhere else.
+  "overrides": [
+    {
+      "files": ["tests/**/*.ts"],
+      "rules": { "typescript/no-explicit-any": "off" }
+    }
+  ],
+
+  "env": { "builtin": true, "browser": true, "node": true },
+
+  // Built artifacts. `node_modules` is skipped by default.
+  "ignorePatterns": ["dist/**", "public/**"]
+}

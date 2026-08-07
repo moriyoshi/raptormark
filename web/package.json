@@ -1,0 +1,29 @@
+{
+  "name": "@raptormark/host",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Host embedder for raptormark/ecvisor wasm modules: a hand-rolled WASI preview1 shim plus the WasmEdge socket extension, shared between the Node reference host and the browser.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "run": "node bin/run.ts",
+    "build": "esbuild src/browser/run.ts --bundle --format=esm --target=es2022 --outfile=dist/raptormark.js",
+    "test:browser": "playwright test",
+    "format": "oxfmt \"src/**/*.ts\" \"tests/**/*.ts\" \"bin/**/*.ts\"",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"tests/**/*.ts\" \"bin/**/*.ts\"",
+    "lint": "oxlint src bin tests --deny-warnings"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "22.15.3",
+    "esbuild": "^0.28.2",
+    "oxfmt": "^0.64.0",
+    "oxlint": "^1.79.0",
+    "typescript": "5.9.2",
+    "vitest": "^4.1.11"
+  }
+}

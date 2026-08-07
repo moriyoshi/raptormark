@@ -1,0 +1,95 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+index 943299b..5100df2 100644
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -663,6 +663,16 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+           // When we find such a instruction, we treat it as `nop`.
+           if (!target_trace) {
+             auto rest_fun_name = manager.AddRestDisasmFunc(inst.branch_taken_pc);
++            // raptormark: an empty name means the target is in no code section,
++            // so this "call" was decoded from something that is not code. Do
++            // exactly what the comment above describes -- treat it as a nop and
++            // carry on at the next instruction -- instead of declaring a
++            // function for an address that has no bytes behind it. The target is
++            // deliberately NOT added to the work list.
++            if (rest_fun_name.empty()) {
++              DirectBranchWithSaveParents(GetOrCreateBranchNotTakenBlock(), block);
++              continue;
++            }
+             target_trace = arch->DeclareLiftedFunction(rest_fun_name, module);
+           }
+           // It may be unnecessary to check this condition.
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+index 72d94e6..55927f7 100644
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -22,6 +22,34 @@ void AArch64TraceManager::SetLiftedTraceDefinition(uint64_t addr, llvm::Function
+ }
+ 
+ std::string AArch64TraceManager::AddRestDisasmFunc(uint64_t addr) {
++  // raptormark: a target outside every code section is not liftable, and saying
++  // so is the caller's business, not a reason to kill the run.
++  //
++  // Some bytes always get decoded as instructions: a literal pool, alignment
++  // padding, or hand-written assembly that carries neither symbols nor CFI
++  // (OpenSSL's aarch64 routines are ~158 KB of exactly that, and no amount of
++  // symbol recovery describes them -- see internal/fuse/ehframe.go). Such a
++  // decode yields a `bl` to a nonsense address. Aborting there discards a lift
++  // of tens of thousands of real functions over one instruction that was never
++  // code.
++  //
++  // Returning empty lets TraceLifter treat the call as a nop, which is what the
++  // comment at its call site already says it intends for unliftable `bl`
++  // targets. The section bound below then keeps a synthetic function from
++  // running past the end of its own section into unrelated bytes.
++  uint64_t sec_end = 0;
++  for (auto &[_, code_section] : elf_obj.code_sections) {
++    if (addr >= code_section.vma && addr < code_section.vma + code_section.size) {
++      sec_end = code_section.vma + code_section.size;
++      break;
++    }
++  }
++  if (sec_end == 0) {
++    LOG(WARNING) << "[WARNING] branch target 0x" << std::hex << addr << std::dec
++                 << " is outside every code section; treating the call as a nop.";
++    return "";
++  }
++
+   auto rest_fun_name = GetUniqueLiftedFuncName("_ecv_rest_fun", addr);
+   auto upper_addr_1 = disasm_funcs.upper_bound(addr);
+   auto upper_addr_2 = rest_disasm_funcs.upper_bound(addr);
+@@ -33,27 +61,13 @@ std::string AArch64TraceManager::AddRestDisasmFunc(uint64_t addr) {
+   } else if (upper_addr_2 != rest_disasm_funcs.end()) {
+     end_addr = upper_addr_2->first;
+   } else {
+-    // raptormark: no known function follows, so bound the synthetic function by
+-    // the end of the code section that contains it.
+-    //
+-    // The original aborted here. That was survivable while every lifted binary
+-    // was statically linked, where the entry closure sits well inside `.text`
+-    // and something always follows. A fused image (internal/fuse) merges each
+-    // library's sections alongside the executable's, so a `bl` into the highest
+-    // merged code section legitimately has nothing above it -- and the whole
+-    // lift died on a target that is perfectly well formed.
+-    end_addr = 0;
+-    for (auto &[_, code_section] : elf_obj.code_sections) {
+-      if (addr >= code_section.vma && addr < code_section.vma + code_section.size) {
+-        end_addr = code_section.vma + code_section.size;
+-        break;
+-      }
+-    }
+-    if (end_addr == 0) {
+-      // Genuinely outside every code section: nothing sane to disassemble.
+-      LOG(FATAL) << "[Bug] rest_disasm_func at 0x" << std::hex << addr
+-                 << " lies outside every code section.";
+-    }
++    // Nothing follows at all: the containing section's end is the bound.
++    end_addr = sec_end;
++  }
++  // The next known function may live in a *later* section, which would make the
++  // synthetic function swallow everything in between. Clamp to this section.
++  if (end_addr > sec_end) {
++    end_addr = sec_end;
+   }
+   rest_disasm_funcs.insert({addr, DisasmFunc(rest_fun_name, addr, end_addr - addr)});
+   return rest_fun_name;

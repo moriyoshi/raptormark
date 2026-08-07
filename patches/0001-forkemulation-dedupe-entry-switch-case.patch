@@ -1,0 +1,29 @@
+diff --git a/backend/remill/lib/BC/ForkEmulation.cpp b/backend/remill/lib/BC/ForkEmulation.cpp
+index df30f72..c278a3b 100644
+--- a/backend/remill/lib/BC/ForkEmulation.cpp
++++ b/backend/remill/lib/BC/ForkEmulation.cpp
+@@ -214,12 +214,20 @@ void TraceLifter::Impl::GenForkNearJump(uint64_t trace_addr) {
+     unreached_ir.CreateRetVoid();
+     auto near_switch_jump = _near_jump_ir.CreateSwitch(t_pc, unreached_bb);
+ 
+-    // Add all next bbs of function or system calling.
++    // Add all next bbs of function or system calling. DEDUPE by case value: two return
++    // sites can share a VMA (and trace_addr below may already be in the set), and a SwitchInst
++    // must have UNIQUE case values -- LLVM 22's bitcode writer aborts on a duplicate
++    // ("Duplicate integer as switch case") where LLVM 16 silently tolerated it (postgres,
++    // JOURNAL 5c6). A VMA maps to exactly one block, so keeping the first case is correct.
++    std::set<uint64_t> added_case_vmas;
+     for (auto t_bb : lift_or_system_calling_bbs) {
+-      near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, rev_lifted_block_map.at(t_bb)), t_bb);
++      uint64_t vma = rev_lifted_block_map.at(t_bb);
++      if (added_case_vmas.insert(vma).second)
++        near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, vma), t_bb);
+     }
+-    // Add entry pc.
+-    near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, trace_addr), org_first_bb);
++    // Add entry pc (skip if a return site already registered this VMA -> same entry block).
++    if (added_case_vmas.insert(trace_addr).second)
++      near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, trace_addr), org_first_bb);
+   }
+ 
+   // Update cache.

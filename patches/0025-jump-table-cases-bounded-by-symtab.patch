@@ -1,0 +1,115 @@
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -1022,41 +1022,79 @@
+           entry_word == 0xD503233FU ||  // paciasp
+           entry_word == 0xD503237FU;    // pacibsp
+       if (br_bb && seeded == 0 && entry_read && !entry_is_landing_pad) {
+-        // Bound the orphan scan to the current function's DISCOVERED extent, not to
+-        // `kFuncCap`/next `bti c`. A non-BTI binary has NO `bti c` markers, so the bti scan
+-        // above ran to kFuncCap (512 KiB) crossing dozens of functions -- harmless there
+-        // (it seeds nothing), but orphan seeding across that whole span would pull thousands
+-        // of OTHER functions' blocks into this trace and explode compile time. `lifted_block_map`
+-        // is per-trace (cleared at each trace, see top of loop), so its max key is THIS
+-        // function's high-water mark; the jump-table cases we need are interleaved at or below
+-        // it (e.g. vfprintf's 0x409edc sits amid blocks discovered above and below it).
+-        uint64_t max_lifted = trace_addr;
+-        for (const auto &kv : lifted_block_map)
+-          if (static_cast<uint64_t>(kv.first) > max_lifted)
+-            max_lifted = static_cast<uint64_t>(kv.first);
+-        uint32_t prev_word = entry_word;  // function entry instruction (never an unconditional xfer)
+-        for (uint64_t insn_vma = trace_addr + 4;
+-             insn_vma <= max_lifted && seeded < kMaxSeed; insn_vma += 4) {
+-          uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+-          if (!manager.TryReadExecutableByte(insn_vma, &b0) ||
+-              !manager.TryReadExecutableByte(insn_vma + 1, &b1) ||
+-              !manager.TryReadExecutableByte(insn_vma + 2, &b2) ||
+-              !manager.TryReadExecutableByte(insn_vma + 3, &b3)) {
+-            break;  // ran off executable memory
+-          }
+-          uint32_t word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
+-                          (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
+-          if (word == 0xD503245FU) {
+-            break;  // next function entry (bti c)
++        // With a symbol table, sweep the function's OWN [start, end) and seed every
++        // instruction that direct discovery missed. This is upstream's original
++        // lift-every-instruction pass, which the BTI scan above replaced wholesale;
++        // restoring it here for the non-BTI case is what makes a jump table work
++        // when its cases carry no landing pads.
++        //
++        // The high-water-mark bound below cannot do this job, and the reason is
++        // circular: a jump table's case bodies lie ABOVE the last block direct
++        // discovery reached (discovery stops AT the `br`), so bounding the search
++        // by that last block makes it structurally unable to find them. nginx's
++        // `_ecv_fde_df5954` is exactly that shape -- 332 bytes per the symbol
++        // table, of which discovery finds 0x50 and halts at `br x1`; all eleven
++        // case bodies from 0xdf59a4 up sit past `max_lifted`. Nothing was seeded,
++        // so at runtime the BR missed the block-address map, fell through to the
++        // function's `L_far_jump` catch-all and thence to `__remill_jump`, which
++        // RE-ENTERS the containing function -- one wasm frame per iteration of an
++        // ordinary guest loop, until the shadow stack died.
++        //
++        // `GetFuncVMA_E` is the same bound upstream used, so this is no wider than
++        // what already shipped: it stops at the next function and cannot pull
++        // another function's blocks in. The `kFuncCap` worry below applies only to
++        // the no-symtab case, which keeps the orphan heuristic.
++        uint64_t func_end = 0;
++        if (lift_config.has_symtab && manager.isFunctionEntry(trace_addr)) {
++          func_end = manager.GetFuncVMA_E(trace_addr);
++        }
++        if (func_end > trace_addr) {
++          for (uint64_t insn_vma = trace_addr; insn_vma < func_end && seeded < kMaxSeed;
++               insn_vma += 4) {
++            if (lifted_block_map.count(insn_vma) == 0) {
++              inst_work_list.insert(insn_vma);
++              ++seeded;
++            }
+           }
+-          bool prev_uncond = (prev_word & 0xFC000000U) == 0x14000000U ||  // b (not bl=0x94...)
+-                             (prev_word & 0xFFFFFC1FU) == 0xD61F0000U ||  // br (branch to reg)
+-                             (prev_word & 0xFFFFFC1FU) == 0xD65F0000U;    // ret
+-          if (prev_uncond && lifted_block_map.count(insn_vma) == 0) {
+-            inst_work_list.insert(insn_vma);
+-            ++seeded;
++        } else {
++          // No symbol table: bound the orphan scan to the current function's DISCOVERED
++          // extent, not to `kFuncCap`/next `bti c`. A non-BTI binary has NO `bti c` markers,
++          // so the bti scan above ran to kFuncCap (512 KiB) crossing dozens of functions --
++          // harmless there (it seeds nothing), but orphan seeding across that whole span
++          // would pull thousands of OTHER functions' blocks into this trace and explode
++          // compile time. `lifted_block_map` is per-trace (cleared at each trace, see top of
++          // loop), so its max key is THIS function's high-water mark; the jump-table cases
++          // reachable this way are interleaved at or below it (e.g. vfprintf's 0x409edc sits
++          // amid blocks discovered above and below it).
++          uint64_t max_lifted = trace_addr;
++          for (const auto &kv : lifted_block_map)
++            if (static_cast<uint64_t>(kv.first) > max_lifted)
++              max_lifted = static_cast<uint64_t>(kv.first);
++          uint32_t prev_word =
++              entry_word;  // function entry instruction (never an unconditional xfer)
++          for (uint64_t insn_vma = trace_addr + 4; insn_vma <= max_lifted && seeded < kMaxSeed;
++               insn_vma += 4) {
++            uint8_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
++            if (!manager.TryReadExecutableByte(insn_vma, &b0) ||
++                !manager.TryReadExecutableByte(insn_vma + 1, &b1) ||
++                !manager.TryReadExecutableByte(insn_vma + 2, &b2) ||
++                !manager.TryReadExecutableByte(insn_vma + 3, &b3)) {
++              break;  // ran off executable memory
++            }
++            uint32_t word = static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) |
++                            (static_cast<uint32_t>(b2) << 16) | (static_cast<uint32_t>(b3) << 24);
++            if (word == 0xD503245FU) {
++              break;  // next function entry (bti c)
++            }
++            bool prev_uncond = (prev_word & 0xFC000000U) == 0x14000000U ||  // b (not bl=0x94...)
++                               (prev_word & 0xFFFFFC1FU) == 0xD61F0000U ||  // br (branch to reg)
++                               (prev_word & 0xFFFFFC1FU) == 0xD65F0000U;    // ret
++            if (prev_uncond && lifted_block_map.count(insn_vma) == 0) {
++              inst_work_list.insert(insn_vma);
++              ++seeded;
++            }
++            prev_word = word;
+           }
+-          prev_word = word;
+         }
+       }
+       lift_all_insn = true;

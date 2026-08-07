@@ -1,0 +1,9 @@
+# RECONSTRUCTED during the 2026-08-01 recovery — the original was lost.
+#
+# builder/Dockerfile uses the repo root as its build context but only needs
+# builder/ and runtime/. Everything else (notably third_party/elfconv, which is
+# ~500 MB and reaches the base image by its own Dockerfile, not this context) is
+# excluded so the context transfer stays small.
+*
+!builder
+!runtime

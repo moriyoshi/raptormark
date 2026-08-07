@@ -1,0 +1,49 @@
+# Recovery staging area: raw tarballs, extracted trees, and build-recipe
+# references from the 2026-08-01 rebuild. Kept on disk as evidence, not tracked.
+/_recovery/
+
+# Agent scratch space and translation outputs.
+/.agents-workspace/
+
+# Rust
+/runtime/target/
+
+# Host embedder (web/).
+#
+# The sources are tracked and node runs them directly -- it strips the types --
+# but a BROWSER cannot, so `web/dist/` holds a bundle, and `web/public/` holds
+# built guest artifacts. Neither belongs in the tree, and both are regenerated
+# by `npm run build` and `TestBuildBrowserFixture`.
+#
+# `web/dist/raptormark.js` is that bundle, and it is ALSO the service-worker
+# script. A worker's maximum scope defaults to the directory it was served from,
+# so one under `dist/` reaches `/_guest/*` only because `internal/serve` sends
+# `Service-Worker-Allowed: /` -- see the comment there before moving it again.
+/web/node_modules/
+/web/dist/
+/web/public/
+/web/test-results/
+/web/playwright-report/
+
+# Build outputs
+*.wasm
+*.bc
+*.o
+*.a
+
+# Cross-built builder tools, staged into the Docker build context by
+# `raptormark build-image`.
+/builder/_tools/
+
+# Crufts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Vim
+*.swp
+*.swo
+
+# Emacs
+*~
+./#*

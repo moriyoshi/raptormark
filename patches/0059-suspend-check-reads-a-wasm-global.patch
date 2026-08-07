@@ -1,0 +1,90 @@
+diff --git a/backend/remill/include/remill/BC/TraceLifter.h b/backend/remill/include/remill/BC/TraceLifter.h
+index b205f9b..fa30b0c 100644
+--- a/backend/remill/include/remill/BC/TraceLifter.h
++++ b/backend/remill/include/remill/BC/TraceLifter.h
+@@ -432,6 +432,9 @@ class TraceLifter::Impl {
+   // to keep lifting into.
+   llvm::BasicBlock *GetOrCreateSuspendRetBlock();
+   llvm::BasicBlock *AddSuspendCheck(llvm::BasicBlock *block);
++  // The `__ecv_unwinding` wasm global (address space 1) the suspend check reads,
++  // in place of calling `_ecv_suspended`. Declared into the module on first use.
++  llvm::GlobalVariable *GetOrCreateUnwindingGlobal();
+ 
+   void Optimize();
+ 
+diff --git a/backend/remill/lib/BC/ForkEmulation.cpp b/backend/remill/lib/BC/ForkEmulation.cpp
+index 33797eb..f520df7 100644
+--- a/backend/remill/lib/BC/ForkEmulation.cpp
++++ b/backend/remill/lib/BC/ForkEmulation.cpp
+@@ -187,6 +187,27 @@ llvm::BasicBlock *TraceLifter::Impl::GetOrCreateSuspendRetBlock() {
+   return suspend_ret_bb;
+ }
+ 
++// The `__ecv_unwinding` wasm global, declared into this module on first use.
++//
++// Address space 1 is clang/LLVM's spelling of a WASM GLOBAL, so this lowers to a
++// single `global.get` rather than a load from linear memory. It is DEFINED in
++// ecvisor's C shim (runtime/cshim/ecv_globals.c); Rust cannot express a wasm
++// global, which is why that shim exists at all, beside the ecv_sp.c one.
++//
++// This replaces a call to `_ecv_suspended`, whose entire body was this one read.
++// Counted on a linked bash module: 33,540 call sites, one after every guest call
++// and every syscall, in 7,567 lifted functions. See .agents/docs/MULTIMODULE.md.
++llvm::GlobalVariable *TraceLifter::Impl::GetOrCreateUnwindingGlobal() {
++  static constexpr const char *kName = "__ecv_unwinding";
++  if (auto *g = module->getNamedGlobal(kName)) {
++    return g;
++  }
++  return new llvm::GlobalVariable(*module, llvm::Type::getInt32Ty(context),
++                                  /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
++                                  /*Initializer=*/nullptr, kName, /*InsertBefore=*/nullptr,
++                                  llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/1);
++}
++
+ // Emit the suspend check that gets a blocked process back to the scheduler.
+ //
+ // The cooperative scheduler suspends a process inside a blocking syscall (or on
+@@ -212,8 +233,13 @@ llvm::BasicBlock *TraceLifter::Impl::AddSuspendCheck(llvm::BasicBlock *block) {
+       {cont_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
+ 
+   llvm::IRBuilder<> ir(block);
+-  auto flag = ir.CreateCall(module->getFunction("_ecv_suspended"), {runtime_ptr});
+-  auto cond = ir.CreateICmpNE(flag, llvm::ConstantInt::get(flag->getType(), 0));
++  auto i32ty = llvm::Type::getInt32Ty(context);
++  // VOLATILE. The flag is written by the runtime from inside the very calls this
++  // check guards, so a plain load is CSE bait: LLVM would happily reuse the value
++  // it read before the call for the test after it, and the process would run on
++  // instead of returning to the scheduler.
++  auto flag = ir.CreateLoad(i32ty, GetOrCreateUnwindingGlobal(), /*isVolatile=*/true);
++  auto cond = ir.CreateICmpNE(flag, llvm::ConstantInt::get(i32ty, 0));
+   ConditionalBranchWithSaveParents(GetOrCreateSuspendRetBlock(), cont_bb, cond, block);
+   return cont_bb;
+ }
+diff --git a/runtime/VmIntrinsics.cpp b/runtime/VmIntrinsics.cpp
+index 9cc92b0..d5c0ced 100644
+--- a/runtime/VmIntrinsics.cpp
++++ b/runtime/VmIntrinsics.cpp
+@@ -327,6 +327,23 @@ extern "C" uint8_t _ecv_suspended(RuntimeManager &rt_m) {
+   return 0;
+ }
+ 
++#if defined(__wasm__)
++// The same flag, as the WASM GLOBAL the codegen now reads instead of calling
++// `_ecv_suspended` (patch 0059). Zero for this runtime, for the reason above.
++//
++// THIS DEFINITION IS WHY THE COMMENT ABOVE EXISTS. `_ecv_suspended` was defined
++// here precisely because the fork_emulation codegen emits its check
++// unconditionally and an undefined symbol breaks the upstream link -- and when
++// that check became a global read, the definition had to follow it or the
++// upstream path breaks in exactly the way that comment predicted. It did:
++// `TestUpstreamRuntime` and `TestFusedDynamicProgram` both failed with
++// `wasm-ld: error: undefined symbol: __ecv_unwinding` until this was added.
++//
++// ecvisor defines its own in runtime/cshim/ecv_globals.c; the two runtimes are
++// linked separately and never together, so there is no duplicate symbol.
++__attribute__((address_space(1))) int __ecv_unwinding;
++#endif
++
+ extern "C" void _ecv_unreached(uint64_t value) {
+   elfconv_runtime_error("You must not reach this point. value: 0x%llx\n", value);
+ }

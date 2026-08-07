@@ -1,0 +1,64 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+index 925c016..f92865e 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+@@ -91,21 +91,27 @@ DEF_SEM_T_STATE(UCVTF_Uint64ToFloat64_FROMV_FPSRStatus, VIu64v2 src) {
+ }
+ 
+ // UCVTF  <Vd>.<T>, <Vn>.<T>
++// The result vector is D, the FLOAT type -- NOT S, the source's unsigned
++// integer type. With `S res{}` every converted lane was converted straight back
++// to an integer by the assignment, so the instruction was a no-op that also
++// destroyed anything too large for the source width: `ucvtf v0.2s, v0.2s` on
++// {0xFFFFFFFF, 3} produced the bit patterns {0, 3} instead of {4.29e9, 3.0}.
++// SCVTF next door already carries the two type parameters; this is that.
+ #define MAKE_UCVTF_VECTOR(elem_size) \
+-  template <typename S> \
++  template <typename S, typename D> \
+   DEF_SEM_T_STATE(UCVTF_Vector_##elem_size, S srcn) { \
+-    S res{}; \
++    D res{}; \
+     auto srcn_v = UReadVI##elem_size(srcn); \
+-    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcn); i++) { \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcn_v); i++) { \
+       res[i] = CheckedCast<uint##elem_size##_t, float##elem_size##_t>(state, srcn_v[i]); \
+     } \
+     return res; \
+   } \
+-  template <typename S> \
++  template <typename S, typename D> \
+   DEF_SEM_T_STATE(UCVTF_Vector_FPSRStatus_##elem_size, S srcn) { \
+-    S res{}; \
++    D res{}; \
+     auto srcn_v = UReadVI##elem_size(srcn); \
+-    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcn); i++) { \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcn_v); i++) { \
+       res[i] = CheckedCastFPSRStatus<uint##elem_size##_t, float##elem_size##_t>(state, srcn_v[i]); \
+     } \
+     return res; \
+@@ -278,16 +284,19 @@ DEF_ISEL(UCVTF_ASISDMISC_R_32_FPSRSTATUS) =
+ DEF_ISEL(UCVTF_ASISDMISC_R_64_FPSRSTATUS) =
+     UCVTF_Uint64ToFloat64_FROMV_FPSRStatus;  // UCVTF  <V><d>, <V><n>
+ 
+-DEF_ISEL(UCVTF_ASIMDMISC_R_2S) = UCVTF_Vector_32<VIu32v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
+-DEF_ISEL(UCVTF_ASIMDMISC_R_4S) = UCVTF_Vector_32<VIu32v4>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
+-DEF_ISEL(UCVTF_ASIMDMISC_R_2D) = UCVTF_Vector_64<VIu64v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(UCVTF_ASIMDMISC_R_2S) =
++    UCVTF_Vector_32<VIu32v2, VIf32v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(UCVTF_ASIMDMISC_R_4S) =
++    UCVTF_Vector_32<VIu32v4, VIf32v4>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(UCVTF_ASIMDMISC_R_2D) =
++    UCVTF_Vector_64<VIu64v2, VIf64v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
+ // FPSR
+ DEF_ISEL(UCVTF_ASIMDMISC_R_2S_FPSRSTATUS) =
+-    UCVTF_Vector_FPSRStatus_32<VIu32v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
++    UCVTF_Vector_FPSRStatus_32<VIu32v2, VIf32v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
+ DEF_ISEL(UCVTF_ASIMDMISC_R_4S_FPSRSTATUS) =
+-    UCVTF_Vector_FPSRStatus_32<VIu32v4>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
++    UCVTF_Vector_FPSRStatus_32<VIu32v4, VIf32v4>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
+ DEF_ISEL(UCVTF_ASIMDMISC_R_2D_FPSRSTATUS) =
+-    UCVTF_Vector_FPSRStatus_64<VIu64v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
++    UCVTF_Vector_FPSRStatus_64<VIu64v2, VIf64v2>;  // UCVTF  <Vd>.<T>, <Vn>.<T>
+ 
+ DEF_ISEL(FCVTZU_64S_FLOAT2INT) =
+     FCVTZU_FloatToUInt<RF32, float32_t, uint64_t>;  // FCVTZU  <Xd>, <Sn>

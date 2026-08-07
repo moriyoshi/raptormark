@@ -1,0 +1,61 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -41,8 +41,38 @@
+ #include <set>
+ #include <sstream>
+ 
++#include <chrono>
++
+ namespace remill {
+ 
++// Decode-vs-emit accounting, to size a decode-only graph pass.
++//
++// Partitioning the lift by call graph needs the graph BEFORE lifting, and that
++// is only affordable if extracting it is cheap relative to lifting. The seam is
++// here: DecodeInstruction below produces the instruction and its branch targets,
++// and LiftIntoBlock immediately after is what emits IR. Lift cost tracks emitted
++// IR volume (4.3-5.2 s/MB measured), and a graph pass emits none -- so the
++// question is what the decode alone costs.
++//
++// Rather than skip the emission (later code reads values LiftIntoBlock creates,
++// so skipping it crashes rather than measures), time both in place. Two
++// steady_clock reads per instruction is ~20 ns against a lift measured in
++// minutes.
++static uint64_t ecv_decode_ns = 0, ecv_emit_ns = 0, ecv_insn_count = 0;
++namespace {
++struct EcvDecodeStats {
++  ~EcvDecodeStats() {
++    if (getenv("ECV_DECODE_STATS")) {
++      fprintf(stderr, "[ecv] insns %llu  decode %.3fs  emit %.3fs\n",
++              (unsigned long long) ecv_insn_count, ecv_decode_ns / 1e9, ecv_emit_ns / 1e9);
++      fflush(stderr);
++    }
++  }
++} ecv_decode_stats_instance;
++}  // namespace
++
++
++
+ // Call-graph edge recording, for the Go-orchestrated pipeline.
+ //
+ // ECV_GRAPH_OUT names a file to write "<caller> <callee>" hex pairs to, one per
+@@ -474,11 +504,18 @@
+       inst.lift_config = lift_config;
+ 
+       // TODO(Ian): not passing context around in trace lifter
++      auto ecv_t0 = std::chrono::steady_clock::now();
+       std::ignore =
+           arch->DecodeInstruction(inst_addr, inst_bytes, inst, this->arch->CreateInitialContext());
++      auto ecv_t1 = std::chrono::steady_clock::now();
+ 
+       // Lift instruction
+       inst.GetLifter()->LiftIntoBlock(inst, block, state_ptr, bb_reg_info_node);
++      auto ecv_t2 = std::chrono::steady_clock::now();
++      ecv_decode_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(ecv_t1 - ecv_t0).count();
++      ecv_emit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(ecv_t2 - ecv_t1).count();
++      ecv_insn_count++;
+ 
+       // Handle lifting a delayed instruction.
+       auto try_delay = arch->MayHaveDelaySlot(inst);

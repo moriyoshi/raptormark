@@ -1,0 +1,71 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index c85f17b..b714754 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5175,6 +5175,20 @@ bool TryDecodeSUB_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   return TryDecodeADD_ASIMDSAME_ONLY(data, inst);
+ }
+ 
++// MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T> (integer vector multiply). Same Rd/Rn/Rm/arrangement
++// operands as ADD, but size==0b11 (64-bit element) is RESERVED -- there is no 2D/1D MUL.
++bool TryDecodeMUL_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (0x3 == data.size) {
++    return false;  // `if size == '11' then ReservedValue();`
++  }
++  uint64_t total_size = data.Q ? 128 : 64;
++  uint64_t elem_size = 8UL << data.size;
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  auto rclass = ArrangementRegClass(total_size, elem_size);
++  return TryDecodeRdW_Rn_Rm(data, inst, rclass);
++}
++
+ // SSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ bool TryDecodeSSHL_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 8dcea0e..512ab7d 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -36862,9 +36862,7 @@ bool TryDecodeFCVTNU_64D_FLOAT2INT(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+-bool TryDecodeMUL_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeMUL_ASIMDSAME_ONLY: implemented in Arch.cpp (NEON integer vector multiply).
+ 
+ // CMTST CMTST_asisdsame_only:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index 0b65511..84f0575 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -213,6 +213,12 @@ MAKE_BROADCAST(SUB, U, Sub, 16)
+ MAKE_BROADCAST(SUB, U, Sub, 32)
+ MAKE_BROADCAST(SUB, U, Sub, 64)
+ 
++// MUL (vector, integer): element-wise product, low bits kept (signed == unsigned here).
++// No 64-bit element form (size==0b11 is reserved), so 8/16/32 only.
++MAKE_BROADCAST(MUL, U, Mul, 8)
++MAKE_BROADCAST(MUL, U, Mul, 16)
++MAKE_BROADCAST(MUL, U, Mul, 32)
++
+ MAKE_BROADCAST(UMIN, U, Min, 8)
+ MAKE_BROADCAST(UMIN, U, Min, 16)
+ MAKE_BROADCAST(UMIN, U, Min, 32)
+@@ -267,6 +273,13 @@ DEF_ISEL(ADD_ASIMDSAME_ONLY_2S) = ADD_32<VIu32v2>;  // ADD  <Vd>.<T>, <Vn>.<T>,
+ DEF_ISEL(ADD_ASIMDSAME_ONLY_4S) = ADD_32<VIu32v4>;  // ADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ DEF_ISEL(ADD_ASIMDSAME_ONLY_2D) = ADD_64<VIu64v2>;  // ADD  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ 
++DEF_ISEL(MUL_ASIMDSAME_ONLY_8B) = MUL_8<VIu8v8>;    // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MUL_ASIMDSAME_ONLY_16B) = MUL_8<VIu8v16>;  // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MUL_ASIMDSAME_ONLY_4H) = MUL_16<VIu16v4>;  // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MUL_ASIMDSAME_ONLY_8H) = MUL_16<VIu16v8>;  // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MUL_ASIMDSAME_ONLY_2S) = MUL_32<VIu32v2>;  // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MUL_ASIMDSAME_ONLY_4S) = MUL_32<VIu32v4>;  // MUL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++
+ DEF_ISEL(SUB_ASIMDSAME_ONLY_8B) = SUB_8<VIu8v8>;  // SUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ DEF_ISEL(SUB_ASIMDSAME_ONLY_16B) = SUB_8<VIu8v16>;  // SUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ DEF_ISEL(SUB_ASIMDSAME_ONLY_4H) = SUB_16<VIu16v4>;  // SUB  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>

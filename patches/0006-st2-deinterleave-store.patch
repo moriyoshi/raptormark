@@ -1,0 +1,125 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..f872ac8 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5235,6 +5235,30 @@ bool TryDecodeST1_ASISDLSE_R2_2V(const InstData &data, Instruction &inst) {
+   return TryDecodeST1_ASISDLSE_R1_1V(data, inst);
+ }
+ 
++// ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]  -- de-interleaving store, no offset.
++// TryDecodeSTn reads selem=2 from the opcode and adds the two source registers
++// with the arrangement suffix; identical structure to ST1's decoder.
++bool TryDecodeST2_ASISDLSE_R2(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  uint64_t num_bytes = 0;
++  if (!TryDecodeSTn(data, inst, &num_bytes)) {
++    return false;
++  }
++  AddBasePlusOffsetMemOp(inst, num_bytes * 8, data.Rn, 0);
++  return true;
++}
++
++// ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>  -- post-index variant.
++bool TryDecodeST2_ASISDLSEP_I2_I(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  uint64_t offset = 0;
++  if (!TryDecodeSTn(data, inst, &offset)) {
++    return false;
++  }
++  AddPostIndexMemOp(inst, offset * 8, data.Rn, offset);
++  return true;
++}
++
+ // ST1  { <Vt>.B }[<index>], [<Xn|SP>]
+ bool TryDecodeST1_ASISDLSO_B1_1B(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..bc870fd 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -23033,9 +23033,7 @@ bool TryDecodeUMNEGL_UMSUBL_64WA_DP_3SRC(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]
+-bool TryDecodeST2_ASISDLSE_R2(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST2_ASISDLSE_R2 implemented in Arch.cpp.
+ 
+ // ST2 ST2_asisdlsep_I2_i:
+ //   0 x Rt       0
+@@ -23071,9 +23069,7 @@ bool TryDecodeST2_ASISDLSE_R2(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // ST2  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
+-bool TryDecodeST2_ASISDLSEP_I2_I(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeST2_ASISDLSEP_I2_I implemented in Arch.cpp.
+ 
+ // ST2 ST2_asisdlsep_R2_r:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index 6650856..4ab1ee6 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1156,6 +1156,59 @@ DEF_ISEL(ST1_ASISDLSEP_I2_I2_1D) =
+ DEF_ISEL(ST1_ASISDLSEP_I2_I2_2D) =
+     ST1_PAIR_POSTINDEX_128<MVI128>;  // ST1  { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>], <imm>
+ 
++// ST2 { <Vt>.<T>, <Vt2>.<T> }, [<Xn|SP>]{, <imm>}  -- store two registers with
++// element de-interleaving: mem[2*i] = src1.elem[i], mem[2*i+1] = src2.elem[i].
++// Built as two register-width output vectors (out0 = interleaved stream[0..n),
++// out1 = stream[n..2n)) written to consecutive register slots -- the ST1_PAIR
++// write idiom. The post-index variant reuses the body; its base-register
++// writeback is decoder-driven (AddPostIndexMemOp), as for ST1.
++namespace {
++#define MAKE_ST2(es) \
++  template <typename V, typename D> \
++  DEF_SEM_VOID_RUN(ST2_##es, V src1, V src2, D dst) { \
++    auto s1 = UReadVI##es(src1); \
++    auto s2 = UReadVI##es(src2); \
++    auto n = GetVectorElemsNum(s1); \
++    auto out0 = s1; \
++    auto out1 = s2; \
++    _Pragma("unroll") for (size_t j = 0; j < n; j++) { \
++      out0[j] = (j & 1) ? s2[j / 2] : s1[j / 2]; \
++      size_t k = j + n; \
++      out1[j] = (k & 1) ? s2[k / 2] : s1[k / 2]; \
++    } \
++    UWriteMVI##es(rt_m, arena_ptr, dst, out0); \
++    UWriteMVI##es(rt_m, arena_ptr, GetElementPtr(dst, 1U), out1); \
++  } \
++  template <typename V, typename D> \
++  DEF_SEM_VOID_RUN(ST2_POSTINDEX_##es, V src1, V src2, D dst) { \
++    ST2_##es<V, D>(arena_ptr, rt_m, src1, src2, dst); \
++  }
++
++MAKE_ST2(8)
++MAKE_ST2(16)
++MAKE_ST2(32)
++MAKE_ST2(64)
++
++#undef MAKE_ST2
++
++}  // namespace
++
++DEF_ISEL(ST2_ASISDLSE_R2_8B) = ST2_8<VIu8v8, MVI64>;
++DEF_ISEL(ST2_ASISDLSE_R2_16B) = ST2_8<VIu8v16, MVI128>;
++DEF_ISEL(ST2_ASISDLSE_R2_4H) = ST2_16<VIu16v4, MVI64>;
++DEF_ISEL(ST2_ASISDLSE_R2_8H) = ST2_16<VIu16v8, MVI128>;
++DEF_ISEL(ST2_ASISDLSE_R2_2S) = ST2_32<VIu32v2, MVI64>;
++DEF_ISEL(ST2_ASISDLSE_R2_4S) = ST2_32<VIu32v4, MVI128>;
++DEF_ISEL(ST2_ASISDLSE_R2_2D) = ST2_64<VIu64v2, MVI128>;
++
++DEF_ISEL(ST2_ASISDLSEP_I2_I_8B) = ST2_POSTINDEX_8<VIu8v8, MVI64>;
++DEF_ISEL(ST2_ASISDLSEP_I2_I_16B) = ST2_POSTINDEX_8<VIu8v16, MVI128>;
++DEF_ISEL(ST2_ASISDLSEP_I2_I_4H) = ST2_POSTINDEX_16<VIu16v4, MVI64>;
++DEF_ISEL(ST2_ASISDLSEP_I2_I_8H) = ST2_POSTINDEX_16<VIu16v8, MVI128>;
++DEF_ISEL(ST2_ASISDLSEP_I2_I_2S) = ST2_POSTINDEX_32<VIu32v2, MVI64>;
++DEF_ISEL(ST2_ASISDLSEP_I2_I_4S) = ST2_POSTINDEX_32<VIu32v4, MVI128>;
++DEF_ISEL(ST2_ASISDLSEP_I2_I_2D) = ST2_POSTINDEX_64<VIu64v2, MVI128>;
++
+ namespace {
+ 
+ #define MAKE_ST1_UNIT(elem_size, elem_num) \

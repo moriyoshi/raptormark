@@ -1,0 +1,197 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index eed072b..29b0760 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7743,6 +7743,53 @@ bool TryDecodeADDHN_ASIMDDIFF_N(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// {S,U}ADDLP / {S,U}ADALP  <Vd>.<Ta>, <Vn>.<Tb> -- pairwise add of ADJACENT
++// source elements, widened to twice the element size.
++//
++// All four were `return false` stubs. cryptography's Rust extension stops on
++// `uaddlp v0.8h, v0.16b`: it is the second half of the vector POPCOUNT idiom,
++// `cnt` (which is lifted) followed by two pairwise widening adds folding byte
++// counts up into halfwords and then words.
++//
++// The arrangement differs from the ASIMDDIFF family below: the destination has
++// the same TOTAL size as the source rather than always 128, because this halves
++// the lane count while doubling the lane width. `size == 0b11` is reserved.
++//
++// ADALP accumulates, so its destination is read-write; ADDLP overwrites. That
++// is the only difference between the two, and it is the one a copy-paste gets
++// wrong silently.
++static bool TryDecodeADDLP_ASIMDMISC(const InstData &data, Instruction &inst, bool accumulate) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.size == 0b11) {
++    return false;
++  }
++  const uint64_t tsize = data.Q ? 128 : 64;
++  const uint64_t s_esize = 8 << data.size;
++  const uint64_t d_esize = s_esize * 2;
++  AddArrangementSpecifierUSHLL(inst, tsize, d_esize, tsize, s_esize);
++  auto d_rclass = ArrangementRegClass(tsize, d_esize);
++  auto s_rclass = ArrangementRegClass(tsize, s_esize);
++  AddRegOperand(inst, accumulate ? kActionReadWrite : kActionWrite, d_rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, s_rclass, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeUADDLP_ASIMDMISC_P(const InstData &data, Instruction &inst) {
++  return TryDecodeADDLP_ASIMDMISC(data, inst, false);
++}
++
++bool TryDecodeSADDLP_ASIMDMISC_P(const InstData &data, Instruction &inst) {
++  return TryDecodeADDLP_ASIMDMISC(data, inst, false);
++}
++
++bool TryDecodeUADALP_ASIMDMISC_P(const InstData &data, Instruction &inst) {
++  return TryDecodeADDLP_ASIMDMISC(data, inst, true);
++}
++
++bool TryDecodeSADALP_ASIMDMISC_P(const InstData &data, Instruction &inst) {
++  return TryDecodeADDLP_ASIMDMISC(data, inst, true);
++}
++
+ // SADDL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+ bool TryDecodeSADDL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 3235362..c45f04a 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -8933,9 +8933,7 @@ bool TryDecodeLD3_ASISDLSEP_R3_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
+-bool TryDecodeUADALP_ASIMDMISC_P(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUADALP_ASIMDMISC_P implemented in Arch.cpp.
+ 
+ // FRINTX FRINTX_asimdmiscfp16_R:
+ //   0 x Rd       0
+@@ -12817,9 +12815,7 @@ bool TryDecodeCMEQ_ASISDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
+-bool TryDecodeUADDLP_ASIMDMISC_P(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUADDLP_ASIMDMISC_P implemented in Arch.cpp.
+ 
+ // LDEORAH LDEORAH_32_memop:
+ //   0 x Rt       0
+@@ -22852,9 +22848,7 @@ bool TryDecodeCMHS_ASISDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
+-bool TryDecodeSADDLP_ASIMDMISC_P(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSADDLP_ASIMDMISC_P implemented in Arch.cpp.
+ 
+ // UMSUBL UMNEGL_UMSUBL_64WA_dp_3src:
+ //   0 x Rd       0
+@@ -30609,9 +30603,7 @@ bool TryDecodeLDTRSH_64_LDST_UNPRIV(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
+-bool TryDecodeSADALP_ASIMDMISC_P(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSADALP_ASIMDMISC_P implemented in Arch.cpp.
+ 
+ // LDTRH LDTRH_32_ldst_unpriv:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index d70ec0c..c6bc95f 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -2392,6 +2392,54 @@ namespace {
+     return res; \
+   }
+ 
++// {S,U}ADDLP / {S,U}ADALP: pairwise add of ADJACENT source lanes, widened.
++//
++// Destination lane i is source lanes 2i and 2i+1 summed at DOUBLE width, so the
++// widening happens before the add and the sum cannot overflow the source type.
++// Widening after would be the same bug patch 0051 documents for the multiplies,
++// and it is invisible for the popcount idiom that brought this in (byte counts
++// max out at 8) -- which is exactly why the guard has to use inputs that
++// saturate the narrow type.
++//
++// ADALP accumulates into the destination; ADDLP overwrites it.
++#define ECV_MAKE_ADDLP(name, rd, ty, s_esize, d_esize) \
++  template <typename D, typename S> \
++  DEF_SEM_T(name##_##s_esize, S srcn) { \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] = ty##d_esize##_t(srcn_v[2 * i]) + ty##d_esize##_t(srcn_v[2 * i + 1]); \
++    } \
++    return res; \
++  }
++
++#define ECV_MAKE_ADALP(name, rd, ty, s_esize, d_esize) \
++  template <typename D, typename S> \
++  DEF_SEM_T(name##_##s_esize, D dst, S srcn) { \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    D res = rd##ReadVI##d_esize(dst); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] += ty##d_esize##_t(srcn_v[2 * i]) + ty##d_esize##_t(srcn_v[2 * i + 1]); \
++    } \
++    return res; \
++  }
++
++ECV_MAKE_ADDLP(UADDLP, U, uint, 8, 16);
++ECV_MAKE_ADDLP(UADDLP, U, uint, 16, 32);
++ECV_MAKE_ADDLP(UADDLP, U, uint, 32, 64);
++ECV_MAKE_ADDLP(SADDLP, S, int, 8, 16);
++ECV_MAKE_ADDLP(SADDLP, S, int, 16, 32);
++ECV_MAKE_ADDLP(SADDLP, S, int, 32, 64);
++ECV_MAKE_ADALP(UADALP, U, uint, 8, 16);
++ECV_MAKE_ADALP(UADALP, U, uint, 16, 32);
++ECV_MAKE_ADALP(UADALP, U, uint, 32, 64);
++ECV_MAKE_ADALP(SADALP, S, int, 8, 16);
++ECV_MAKE_ADALP(SADALP, S, int, 16, 32);
++ECV_MAKE_ADALP(SADALP, S, int, 32, 64);
++
++#undef ECV_MAKE_ADDLP
++#undef ECV_MAKE_ADALP
++
+ MAKE_MULL(UMULL, U, uint, 8, 16);
+ MAKE_MULL(UMULL, U, uint, 16, 32);
+ MAKE_MULL(UMULL, U, uint, 32, 64);
+@@ -2414,6 +2462,31 @@ MAKE_MLXL(SMLSL, S, int, -=, 32, 64);
+ 
+ }  // namespace
+ 
++DEF_ISEL(UADDLP_ASIMDMISC_P_4H8B) = UADDLP_8<VIu16v4, VIu8v8>;  // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADDLP_ASIMDMISC_P_8H16B) = UADDLP_8<VIu16v8, VIu8v16>;  // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADDLP_ASIMDMISC_P_2S4H) = UADDLP_16<VIu32v2, VIu16v4>;  // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADDLP_ASIMDMISC_P_4S8H) = UADDLP_16<VIu32v4, VIu16v8>;  // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADDLP_ASIMDMISC_P_1D2S) = UADDLP_32<VIu64v1, VIu32v2>;  // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADDLP_ASIMDMISC_P_2D4S) = UADDLP_32<VIu64v2, VIu32v4>;  // UADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADDLP_ASIMDMISC_P_4H8B) = SADDLP_8<VIi16v4, VIi8v8>;  // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADDLP_ASIMDMISC_P_8H16B) = SADDLP_8<VIi16v8, VIi8v16>;  // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADDLP_ASIMDMISC_P_2S4H) = SADDLP_16<VIi32v2, VIi16v4>;  // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADDLP_ASIMDMISC_P_4S8H) = SADDLP_16<VIi32v4, VIi16v8>;  // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADDLP_ASIMDMISC_P_1D2S) = SADDLP_32<VIi64v1, VIi32v2>;  // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADDLP_ASIMDMISC_P_2D4S) = SADDLP_32<VIi64v2, VIi32v4>;  // SADDLP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADALP_ASIMDMISC_P_4H8B) = UADALP_8<VIu16v4, VIu8v8>;  // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADALP_ASIMDMISC_P_8H16B) = UADALP_8<VIu16v8, VIu8v16>;  // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADALP_ASIMDMISC_P_2S4H) = UADALP_16<VIu32v2, VIu16v4>;  // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADALP_ASIMDMISC_P_4S8H) = UADALP_16<VIu32v4, VIu16v8>;  // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADALP_ASIMDMISC_P_1D2S) = UADALP_32<VIu64v1, VIu32v2>;  // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(UADALP_ASIMDMISC_P_2D4S) = UADALP_32<VIu64v2, VIu32v4>;  // UADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADALP_ASIMDMISC_P_4H8B) = SADALP_8<VIi16v4, VIi8v8>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADALP_ASIMDMISC_P_8H16B) = SADALP_8<VIi16v8, VIi8v16>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADALP_ASIMDMISC_P_2S4H) = SADALP_16<VIi32v2, VIi16v4>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADALP_ASIMDMISC_P_4S8H) = SADALP_16<VIi32v4, VIi16v8>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADALP_ASIMDMISC_P_1D2S) = SADALP_32<VIi64v1, VIi32v2>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
++DEF_ISEL(SADALP_ASIMDMISC_P_2D4S) = SADALP_32<VIi64v2, VIi32v4>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
++
+ DEF_ISEL(UMULL_ASIMDDIFF_L_8H8B) = UMULL_8<VIu16v8, VIu8v8>;
+ DEF_ISEL(UMULL_ASIMDDIFF_L_4S4H) = UMULL_16<VIu32v4, VIu16v4>;
+ DEF_ISEL(UMULL_ASIMDDIFF_L_2D2S) = UMULL_32<VIu64v2, VIu32v2>;

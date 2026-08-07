@@ -1,0 +1,201 @@
+diff --git a/backend/remill/include/remill/Arch/Runtime/Intrinsics.h b/backend/remill/include/remill/Arch/Runtime/Intrinsics.h
+index 890f5b6..910b169 100644
+--- a/backend/remill/include/remill/Arch/Runtime/Intrinsics.h
++++ b/backend/remill/include/remill/Arch/Runtime/Intrinsics.h
+@@ -133,6 +133,12 @@ extern "C" {
+ 
+ [[gnu::used]] extern void _ecv_func_epilogue(State &, RuntimeManager &);
+ 
++// Non-zero when the runtime suspended the current process (a blocking syscall,
++// exit, or execve). fork_emulation codegen tests this after every syscall and
++// every lifted call, and returns immediately when it is set -- see
++// TraceLifter::Impl::AddSuspendCheck.
++[[gnu::used]] extern uint8_t _ecv_suspended(RuntimeManager &);
++
+ // This intrinsic must be tagged with the `always_inline` function attribute
+ // since it has an implementation we want to use in Anvill's lifted IR.
+ //
+diff --git a/backend/remill/include/remill/BC/TraceLifter.h b/backend/remill/include/remill/BC/TraceLifter.h
+index f230cb2..01dc772 100644
+--- a/backend/remill/include/remill/BC/TraceLifter.h
++++ b/backend/remill/include/remill/BC/TraceLifter.h
+@@ -370,6 +370,12 @@ class TraceLifter::Impl {
+   // emscripten browser fork emulation
+   void GenForkNearJump(uint64_t trace_addr);
+ 
++  // Suspend-by-early-return (fork_emulation). AddSuspendCheck terminates
++  // `block` with a test of `_ecv_suspended` and returns the fall-through block
++  // to keep lifting into.
++  llvm::BasicBlock *GetOrCreateSuspendRetBlock();
++  llvm::BasicBlock *AddSuspendCheck(llvm::BasicBlock *block);
++
+   void Optimize();
+ 
+   const Arch *const arch;
+@@ -408,6 +414,10 @@ class TraceLifter::Impl {
+ 
+   llvm::BasicBlock *_near_jump_bb;
+ 
++  // The single `ret void` block every suspend check in this function branches
++  // to. Lazily created, reset per lifted function.
++  llvm::BasicBlock *suspend_ret_bb;
++
+   LiftConfig lift_config;
+ 
+   // In the latest implementation, we don't use this because we can apply VPR optimization to the almost Linux/ELF binary.
+diff --git a/backend/remill/lib/Arch/Runtime/Intrinsics.cpp b/backend/remill/lib/Arch/Runtime/Intrinsics.cpp
+index 921cdd1..b73a3e3 100644
+--- a/backend/remill/lib/Arch/Runtime/Intrinsics.cpp
++++ b/backend/remill/lib/Arch/Runtime/Intrinsics.cpp
+@@ -130,6 +130,7 @@ extern "C" [[gnu::used]] void __remill_intrinsics(void) {
+   USED(__remill_async_hyper_call);
+   USED(__remill_sync_hyper_call);
+   USED(__remill_syscall_tranpoline_call);
++  USED(_ecv_suspended);
+ 
+   USED(__remill_undefined_8);
+   USED(__remill_undefined_16);
+diff --git a/backend/remill/lib/BC/ForkEmulation.cpp b/backend/remill/lib/BC/ForkEmulation.cpp
+index df30f72..e60aa42 100644
+--- a/backend/remill/lib/BC/ForkEmulation.cpp
++++ b/backend/remill/lib/BC/ForkEmulation.cpp
+@@ -176,6 +176,48 @@ void TraceLifter::Impl::AddFarJumpBB() {
+       {far_jump_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
+ }
+ 
++// The one `ret void` block every suspend check in this function branches to.
++llvm::BasicBlock *TraceLifter::Impl::GetOrCreateSuspendRetBlock() {
++  if (!suspend_ret_bb) {
++    suspend_ret_bb = llvm::BasicBlock::Create(context, "L_suspend_ret", func);
++    llvm::ReturnInst::Create(context, suspend_ret_bb);
++    virtual_regs_opt->bb_reg_info_node_map.insert(
++        {suspend_ret_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++  }
++  return suspend_ret_bb;
++}
++
++// Emit the suspend check that gets a blocked process back to the scheduler.
++//
++// The cooperative scheduler suspends a process inside a blocking syscall (or on
++// exit/execve) and rebuilds its stack by call-history replay when it next runs,
++// so the frames between the syscall and the scheduler carry nothing worth
++// saving -- they only have to be torn down. A plain `ret` does that: it needs no
++// wasm proposal (unlike the exnref EH unwind this replaces, which no released
++// containerd shim enables), and it runs each function's real epilogue, so the
++// `__stack_pointer` global is popped instead of leaking one frame per yield.
++//
++// Placement is not free: the check must sit exactly where the EH unwind used to
++// leave the function -- after the call/syscall and BEFORE the caller's
++// `_ecv_func_epilogue`. The unwind returned from inside the callee, so the
++// caller's epilogue never ran and never popped the call history; the history is
++// the replay material, so popping it here would lose the frame.
++//
++// Nothing is spilled because fork_emulation forces norm_mode (Lift.cpp), which
++// disables VRP and makes AddStoreForAllSemantics unconditional: every guest
++// register already lives in the State struct at this point.
++llvm::BasicBlock *TraceLifter::Impl::AddSuspendCheck(llvm::BasicBlock *block) {
++  auto cont_bb = llvm::BasicBlock::Create(context, "L_no_suspend", func);
++  virtual_regs_opt->bb_reg_info_node_map.insert(
++      {cont_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++
++  llvm::IRBuilder<> ir(block);
++  auto flag = ir.CreateCall(module->getFunction("_ecv_suspended"), {runtime_ptr});
++  auto cond = ir.CreateICmpNE(flag, llvm::ConstantInt::get(flag->getType(), 0));
++  ConditionalBranchWithSaveParents(GetOrCreateSuspendRetBlock(), cont_bb, cond, block);
++  return cont_bb;
++}
++
+ /// fork emulation helper function
+ void TraceLifter::Impl::GenForkNearJump(uint64_t trace_addr) {
+ 
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+index 86cbd18..ba68d98 100644
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -320,6 +320,7 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+     lift_all_insn = false;
+     far_jump_bb = nullptr;
+     _near_jump_bb = nullptr;
++    suspend_ret_bb = nullptr;
+     bb_addrs.clear();
+     bb_addr_vmas.clear();
+     lift_or_system_calling_bbs.clear();
+@@ -566,6 +567,11 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+           // Therefore, we force to return at this block because we assume that this instruction don't come back to.
+           if (inst.lift_config.fork_emulation) {
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
++            // The SVC semantics were already lifted into `block`, so the syscall
++            // has run by now and may have suspended this process (blocking
++            // syscall, exit, execve). Get back to the scheduler before anything
++            // else in this function executes.
++            block = AddSuspendCheck(block);
+           }
+           if (manager.isFunctionEntry(inst.next_pc)) {
+             llvm::ReturnInst::Create(context, block);
+@@ -599,8 +605,12 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+ 
+           // call `_ecv_func_epilogue`
+           if (inst.lift_config.fork_emulation) {
++            // The callee may have suspended somewhere below us. Return BEFORE
++            // the epilogue, so this frame stays on the call history for replay.
++            block = AddSuspendCheck(block);
++            llvm::IRBuilder<> cont_ir(block);
+             // call `_ecv_func_epilogue`
+-            ir.CreateCall(module->getFunction("_ecv_func_epilogue"), {state_ptr, runtime_ptr});
++            cont_ir.CreateCall(module->getFunction("_ecv_func_epilogue"), {state_ptr, runtime_ptr});
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
+           }
+ 
+@@ -689,8 +699,12 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+ 
+           // call `_ecv_func_epilogue`
+           if (inst.lift_config.fork_emulation) {
++            // The callee may have suspended somewhere below us. Return BEFORE
++            // the epilogue, so this frame stays on the call history for replay.
++            block = AddSuspendCheck(block);
++            llvm::IRBuilder<> cont_ir(block);
+             // call `_ecv_func_epilogue`
+-            ir.CreateCall(module->getFunction("_ecv_func_epilogue"), {state_ptr, runtime_ptr});
++            cont_ir.CreateCall(module->getFunction("_ecv_func_epilogue"), {state_ptr, runtime_ptr});
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
+           }
+ 
+diff --git a/backend/remill/tests/AArch64/Run.cpp b/backend/remill/tests/AArch64/Run.cpp
+index a70c361..cce9174 100644
+--- a/backend/remill/tests/AArch64/Run.cpp
++++ b/backend/remill/tests/AArch64/Run.cpp
+@@ -273,6 +273,12 @@ void _ecv_func_epilogue(State &, RuntimeManager &) {
+   abort();
+ }
+ 
++// The instruction tests run one instruction at a time with no scheduler, so
++// nothing can ever be suspended.
++uint8_t _ecv_suspended(RuntimeManager &) {
++  return 0;
++}
++
+ void __remill_jump(uint8_t *, State &, addr_t, RuntimeManager *) {
+   abort();
+ }
+diff --git a/runtime/VmIntrinsics.cpp b/runtime/VmIntrinsics.cpp
+index 53d9e09..9cc92b0 100644
+--- a/runtime/VmIntrinsics.cpp
++++ b/runtime/VmIntrinsics.cpp
+@@ -316,6 +316,17 @@ extern "C" void _ecv_save_call_history(State &state, RuntimeManager &rt_m, uint6
+ extern "C" void _ecv_func_epilogue(State &state, RuntimeManager &rt_m) {}
+ #endif
+ 
++// Always 0 for this runtime. The suspend-by-early-return path the fork_emulation
++// codegen emits belongs to the raptormark supervisor (ecvisor), which suspends a
++// process by raising this flag and letting every lifted frame return; here the
++// emscripten runtime still suspends by asyncify unwind, so the check must never
++// fire and the lifted code proceeds exactly as it did before. The definition
++// exists because the codegen emits the call unconditionally under
++// --fork_emulation, and an undefined symbol would break the upstream link.
++extern "C" uint8_t _ecv_suspended(RuntimeManager &rt_m) {
++  return 0;
++}
++
+ extern "C" void _ecv_unreached(uint64_t value) {
+   elfconv_runtime_error("You must not reach this point. value: 0x%llx\n", value);
+ }

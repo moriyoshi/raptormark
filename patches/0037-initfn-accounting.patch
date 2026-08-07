@@ -1,0 +1,42 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -63,6 +63,7 @@
+ // the machinery around them; these account for the per-trace passes that walk
+ // every block, and for the per-block bookkeeping the disabled VRO path consumes.
+ static uint64_t ecv_indirect_ns = 0, ecv_fork_ns = 0, ecv_indirect_count = 0;
++static uint64_t ecv_initfn_ns = 0, ecv_initfn_count = 0;
+ // The instruction work-list loop in full: splits the unaccounted ~95% into
+ // per-instruction machinery (inside) and per-trace machinery (outside).
+ static uint64_t ecv_instloop_ns = 0;
+@@ -96,11 +97,12 @@
+     if (getenv("ECV_DECODE_STATS")) {
+       fprintf(stderr,
+               "[ecv] insns %llu  decode %.3fs  emit %.3fs  indirectbr %.3fs  fork %.3fs  "
+-              "bbreg %llu/%.3fs  vropt %llu/%.3fs  instloop %.3fs  indbr_calls %llu\n",
++              "bbreg %llu/%.3fs  vropt %llu/%.3fs  instloop %.3fs  indbr_calls %llu  initfn %llu/%.3fs\n",
+               (unsigned long long) ecv_insn_count, ecv_decode_ns / 1e9, ecv_emit_ns / 1e9,
+               ecv_indirect_ns / 1e9, ecv_fork_ns / 1e9, (unsigned long long) ecv_bbreg_count,
+               ecv_bbreg_ns / 1e9, (unsigned long long) ecv_vropt_count, ecv_vropt_ns / 1e9,
+-              ecv_instloop_ns / 1e9, (unsigned long long) ecv_indirect_count);
++              ecv_instloop_ns / 1e9, (unsigned long long) ecv_indirect_count,
++              (unsigned long long) ecv_initfn_count, ecv_initfn_ns / 1e9);
+       fflush(stderr);
+     }
+   }
+@@ -426,7 +428,14 @@
+     // Fill in the function, and make sure the block with all register
+     // variables jumps to the block that will contain the first instruction
+     // of the trace.
+-    arch->InitializeEmptyLiftedFunction(func);
++    {
++      auto ecv_e0 = std::chrono::steady_clock::now();
++      arch->InitializeEmptyLiftedFunction(func);
++      ecv_initfn_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                           std::chrono::steady_clock::now() - ecv_e0)
++                           .count();
++      ecv_initfn_count++;
++    }
+ 
+     arena_ptr = NthArgument(func, kArenaPointerArgNum);
+     state_ptr = NthArgument(func, kStatePointerArgNum);

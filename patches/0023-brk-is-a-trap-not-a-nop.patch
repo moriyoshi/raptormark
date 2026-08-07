@@ -1,0 +1,31 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..1981baa 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -99,8 +99,24 @@ Instruction::Category InstCategory(const aarch64::InstData &inst) {
+     case aarch64::InstName::HINT:
+     case aarch64::InstName::NOP: return Instruction::kCategoryNoOp;
+ 
+-    // Note: These are implemented with synchronous hyper calls.
+-    case aarch64::InstName::BRK: return Instruction::kCategoryNormal;
++    // BRK is a trap: on Linux it raises SIGTRAP, whose default action
++    // terminates the process. Nothing after it executes, so it is an error
++    // category, not a normal instruction.
++    //
++    // It was `kCategoryNormal`, which lifted it as "run the semantics, then
++    // fall through". The semantics call `__remill_sync_hyper_call`, and the
++    // only definition of that reaching the module is remill's own no-op stub --
++    // so a guest trap did nothing at all and execution continued into whatever
++    // followed. That turned a loud guest-side abort into a silent wrong answer:
++    // musl's `exit` takes a deliberate crash path (`strb wzr,[x0=0]; brk #0x3e8`)
++    // when its thread id is zero, and because the arena has no page protection
++    // the null store was harmless and the `brk` fell through, so `exit`
++    // RETURNED. Control then ran off the end of the function. Finding that cost
++    // most of a debugging session; a trap that traps would have named itself.
++    //
++    // `kCategoryError` emits a terminating call to `__remill_error`, which
++    // ecvisor reports as fatal with the faulting PC.
++    case aarch64::InstName::BRK: return Instruction::kCategoryError;
+ 
+     default: return Instruction::kCategoryNormal;
+   }

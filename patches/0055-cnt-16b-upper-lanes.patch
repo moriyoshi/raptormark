@@ -1,0 +1,42 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index a43f18a..162d033 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -2017,16 +2017,32 @@ DEF_ISEL(DC_SYS_CR_SYSTEM) = DC_ZVA<M64W>;  // DC  <dc_op>, <Xt>
+ 
+ namespace {
+ 
++// CNT counts the set bits of EACH BYTE independently, so it is done per byte
++// here rather than by a word-wide SWAR.
++//
++// The previous version reinterpreted the whole vector as one `uint<total_size>_t`
++// and applied the classic SWAR sequence -- with 64-BIT mask literals. For the
++// 8B form that is correct. For the 16B form the masks are zero-extended to 128
++// bits, so `& 0x5555555555555555` clears the upper half and lanes 8..15 always
++// came back ZERO.
++//
++// It survived because the only thing that reaches CNT is the popcount idiom
++// `cnt / uaddlp / uaddlp`, and `uaddlp` was itself an unimplemented stub -- so
++// nothing had ever executed a 16B `cnt` and looked at the answer. Found by
++// isolating `cnt` in the patch 0054 guard when only the upper two popcount
++// words were wrong.
++//
++// Per-byte needs no width-dependent constants at all, and drops the
++// reinterpret_cast of a vector to an integer with it.
+ #define MAKE_CNT(total_size, elem_num) \
+   DEF_SEM_T(CNT_SIMD_VI##total_size, VIu8v##elem_num src) { \
+     auto src_vec = UReadVI8(src); \
+-    auto d0 = *reinterpret_cast<uint##total_size##_t *>(&src_vec); \
+     _ecv_u8v##elem_num##_t res = {}; \
+-    uint##total_size##_t cnt = d0 - ((d0 >> 1) & 0x5555555555555555); \
+-    cnt = (cnt & 0x3333333333333333) + ((cnt >> 2) & 0x3333333333333333); \
+-    cnt = (cnt + (cnt >> 4)) & 0x0f0f0f0f0f0f0f0f; \
+     _Pragma("unroll") for (int i = 0; i < elem_num; i++) { \
+-      res[i] = (uint8_t) ((cnt >> i * 8) & 0xff); \
++      uint8_t b = static_cast<uint8_t>(src_vec[i]); \
++      b = static_cast<uint8_t>(b - ((b >> 1) & 0x55)); \
++      b = static_cast<uint8_t>((b & 0x33) + ((b >> 2) & 0x33)); \
++      res[i] = static_cast<uint8_t>((b + (b >> 4)) & 0x0f); \
+     } \
+     return res; \
+   }  // namespace

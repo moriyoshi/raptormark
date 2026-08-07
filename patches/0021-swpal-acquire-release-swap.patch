@@ -1,0 +1,79 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index 2b0f446..01efcc9 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -1739,6 +1739,35 @@ bool TryDecodeSWPL_64_MEMOP(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// SWPAL  <Ws>, <Wt>, [<Xn|SP>]
++//
++// raptormark: SWP with BOTH acquire and release ordering. Its three siblings
++// (SWP, SWPA, SWPL) were decoded here and share one semantics template; only
++// the acquire-release form was left as a generated stub returning false. That
++// made it decode as INVALID, so any binary using
++// __atomic_exchange_n(..., __ATOMIC_ACQ_REL) -- the ordering GCC emits for a
++// plain C11 atomic exchange -- trapped at run time with `unreachable`.
++//
++// Ordering is not modelled: the guest is cooperatively scheduled and never
++// preempted mid-instruction, which is the same assumption the existing SWPA and
++// SWPL decoders make. The operand shape is therefore identical to SWPA.
++bool TryDecodeSWPAL_32_MEMOP(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rs);
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 32, data.Rn, 0);
++  return true;
++}
++
++// SWPAL  <Xs>, <Xt>, [<Xn|SP>]
++bool TryDecodeSWPAL_64_MEMOP(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Runtime;
++  AddRegOperand(inst, kActionWrite, kRegX, kUseAsValue, data.Rs);
++  AddRegOperand(inst, kActionRead, kRegX, kUseAsValue, data.Rt);
++  AddBasePlusOffsetMemOp(inst, 64, data.Rn, 0);
++  return true;
++}
++
+ // LDADD  <Ws>, <Wt>, [<Xn|SP>]
+ bool TryDecodeLDADD_32_MEMOP(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Runtime;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 60686a7..64f250a 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -5100,9 +5100,7 @@ bool TryDecodeSUB_ASISDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 0 size     0
+ //  31 1 size     1
+ // SWPAL  <Ws>, <Wt>, [<Xn|SP>]
+-bool TryDecodeSWPAL_32_MEMOP(const InstData &, Instruction &) {
+-  return false;
+-}
++// SWPAL_32_MEMOP is implemented in Arch.cpp alongside SWP/SWPA/SWPL.
+ 
+ // SWPAL SWPAL_64_memop:
+ //   0 x Rt       0
+@@ -5138,9 +5136,7 @@ bool TryDecodeSWPAL_32_MEMOP(const InstData &, Instruction &) {
+ //  30 1 size     0
+ //  31 1 size     1
+ // SWPAL  <Xs>, <Xt>, [<Xn|SP>]
+-bool TryDecodeSWPAL_64_MEMOP(const InstData &, Instruction &) {
+-  return false;
+-}
++// SWPAL_64_MEMOP is implemented in Arch.cpp alongside SWP/SWPA/SWPL.
+ 
+ // SMC SMC_EX_exception:
+ //   0 1 LL       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index 22d136f..2ac179a 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -262,6 +262,8 @@ DEF_ISEL(SWPA_64_MEMOP) = SWP_MEMOP<R64, M64W>;  // SWPA  <Xs>, <Xt>, [<Xn|SP>]
+ 
+ DEF_ISEL(SWPL_32_MEMOP) = SWP_MEMOP<R32, M32W>;  // SWPL  <Ws>, <Wt>, [<Xn|SP>]
+ DEF_ISEL(SWPL_64_MEMOP) = SWP_MEMOP<R64, M64W>;  // SWPL  <Xs>, <Xt>, [<Xn|SP>]
++DEF_ISEL(SWPAL_32_MEMOP) = SWP_MEMOP<R32, M32W>;  // SWPAL  <Ws>, <Wt>, [<Xn|SP>]
++DEF_ISEL(SWPAL_64_MEMOP) = SWP_MEMOP<R64, M64W>;  // SWPAL  <Xs>, <Xt>, [<Xn|SP>]
+ 
+ DEF_ISEL(LDADD_32_MEMOP) = LDADD_MEMOP<R32, M32W>;  // LDADD  <Ws>, <Wt>, [<Xn|SP>]
+ DEF_ISEL(LDADD_64_MEMOP) = LDADD_MEMOP<R64, M64W>;  // LDADD  <Xs>, <Xt>, [<Xn|SP>]

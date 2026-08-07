@@ -1,0 +1,103 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..fb46a43 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -6826,6 +6826,28 @@ bool TryDecodeSADDL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// SMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- signed multiply-accumulate long.
++// Same widening arrangement as SADDL, but the destination is an accumulator so
++// it is read-write (mirrors ADDHN's kActionReadWrite dst).
++bool TryDecodeSMLAL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.size == 0b11) {
++    return false;
++  }
++  uint64_t d_tsize, s_tsize, d_esize, s_esize;
++  d_tsize = 128;
++  s_tsize = data.Q ? 128 : 64;
++  d_esize = 16 << data.size;
++  s_esize = 8 << data.size;
++  AddArrangementSpecifierUSHLL(inst, d_tsize, d_esize, s_tsize, s_esize);
++  auto d_rclass = ArrangementRegClass(d_tsize, d_esize);
++  auto s_rclass = ArrangementRegClass(s_tsize, s_esize);
++  AddRegOperand(inst, kActionReadWrite, d_rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, s_rclass, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, s_rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
+ // SSUBW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
+ bool TryDecodeSSUBW_ASIMDDIFF_W(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..f05cbb2 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -16642,9 +16642,7 @@ bool TryDecodeFRECPS_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeSMLAL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSMLAL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // LDSMINAH LDSMINAH_32_memop:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index f35c709..0b65511 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -1979,6 +1979,50 @@ DEF_ISEL(SADDL_ASIMDDIFF_L_8H16B) = SADDL2_8<VIi16v8, VIi8v16>;
+ DEF_ISEL(SADDL_ASIMDDIFF_L_4S8H) = SADDL2_16<VIi32v4, VIi16v8>;
+ DEF_ISEL(SADDL_ASIMDDIFF_L_2D4S) = SADDL2_32<VIi64v2, VIi32v4>;
+ 
++// SMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>  -- signed multiply-accumulate long.
++// Like SADDL (widening) but multiplies the two narrow source elements and ADDS
++// into the wide destination accumulator (read via the kActionReadWrite dst, as
++// ADDHN2 does). The "2" variant consumes the high-half source elements.
++namespace {
++#define MAKE_SMLAL(s_esize, d_esize) \
++  template <typename D, typename S> \
++  DEF_SEM_T(SMLAL_##s_esize, D dst, S srcn, S srcm) { \
++    auto srcn_v = SReadVI##s_esize(srcn); \
++    auto srcm_v = SReadVI##s_esize(srcm); \
++    D res = SReadVI##d_esize(dst); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] += int##d_esize##_t(srcn_v[i]) * int##d_esize##_t(srcm_v[i]); \
++    } \
++    return res; \
++  } \
++  template <typename D, typename S> \
++  DEF_SEM_T(SMLAL2_##s_esize, D dst, S srcn, S srcm) { \
++    auto srcn_v = SReadVI##s_esize(srcn); \
++    auto srcm_v = SReadVI##s_esize(srcm); \
++    D res = SReadVI##d_esize(dst); \
++    auto res_len = GetVectorElemsNum(res); \
++    _Pragma("unroll") for (size_t i = 0; i < res_len; i++) { \
++      res[i] += int##d_esize##_t(srcn_v[i + res_len]) * int##d_esize##_t(srcm_v[i + res_len]); \
++    } \
++    return res; \
++  }
++
++MAKE_SMLAL(8, 16);
++MAKE_SMLAL(16, 32);
++MAKE_SMLAL(32, 64);
++
++#undef MAKE_SMLAL
++
++}  // namespace
++
++DEF_ISEL(SMLAL_ASIMDDIFF_L_8H8B) = SMLAL_8<VIi16v8, VIi8v8>;
++DEF_ISEL(SMLAL_ASIMDDIFF_L_4S4H) = SMLAL_16<VIi32v4, VIi16v4>;
++DEF_ISEL(SMLAL_ASIMDDIFF_L_2D2S) = SMLAL_32<VIi64v2, VIi32v2>;
++
++DEF_ISEL(SMLAL_ASIMDDIFF_L_8H16B) = SMLAL2_8<VIi16v8, VIi8v16>;
++DEF_ISEL(SMLAL_ASIMDDIFF_L_4S8H) = SMLAL2_16<VIi32v4, VIi16v8>;
++DEF_ISEL(SMLAL_ASIMDDIFF_L_2D4S) = SMLAL2_32<VIi64v2, VIi32v4>;
++
+ // SSUBW{2}  <Vd>.<Ta>, <Vn>.<Ta>, <Vm>.<Tb>
+ namespace {
+ #define MAKE_SSUBW(ta_esize, tb_esize) \

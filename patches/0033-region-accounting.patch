@@ -1,0 +1,134 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -59,12 +59,44 @@
+ // steady_clock reads per instruction is ~20 ns against a lift measured in
+ // minutes.
+ static uint64_t ecv_decode_ns = 0, ecv_emit_ns = 0, ecv_insn_count = 0;
++// Where the other ~95% goes. decode+emit are 4.1-4.5% of a lift, so the cost is
++// the machinery around them; these account for the per-trace passes that walk
++// every block, and for the per-block bookkeeping the disabled VRO path consumes.
++static uint64_t ecv_indirect_ns = 0, ecv_fork_ns = 0;
++static uint64_t ecv_bbreg_ns = 0, ecv_bbreg_count = 0;
++static uint64_t ecv_vropt_ns = 0, ecv_vropt_count = 0;
++
++template <typename... A>
++static BBRegInfoNode *EcvNewBBRegInfoNode(A &&...args) {
++  auto t0 = std::chrono::steady_clock::now();
++  auto *p = ::new BBRegInfoNode(std::forward<A>(args)...);
++  ecv_bbreg_ns +=
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0)
++          .count();
++  ecv_bbreg_count++;
++  return p;
++}
++
++template <typename... A>
++static VirtualRegsOpt *EcvNewVirtualRegsOpt(A &&...args) {
++  auto t0 = std::chrono::steady_clock::now();
++  auto *p = ::new VirtualRegsOpt(std::forward<A>(args)...);
++  ecv_vropt_ns +=
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0)
++          .count();
++  ecv_vropt_count++;
++  return p;
++}
+ namespace {
+ struct EcvDecodeStats {
+   ~EcvDecodeStats() {
+     if (getenv("ECV_DECODE_STATS")) {
+-      fprintf(stderr, "[ecv] insns %llu  decode %.3fs  emit %.3fs\n",
+-              (unsigned long long) ecv_insn_count, ecv_decode_ns / 1e9, ecv_emit_ns / 1e9);
++      fprintf(stderr,
++              "[ecv] insns %llu  decode %.3fs  emit %.3fs  indirectbr %.3fs  fork %.3fs  "
++              "bbreg %llu/%.3fs  vropt %llu/%.3fs\n",
++              (unsigned long long) ecv_insn_count, ecv_decode_ns / 1e9, ecv_emit_ns / 1e9,
++              ecv_indirect_ns / 1e9, ecv_fork_ns / 1e9, (unsigned long long) ecv_bbreg_count,
++              ecv_bbreg_ns / 1e9, (unsigned long long) ecv_vropt_count, ecv_vropt_ns / 1e9);
+       fflush(stderr);
+     }
+   }
+@@ -383,7 +415,7 @@
+     lifted_funcs.insert(func);
+ 
+     CHECK(func->isDeclaration());
+-    virtual_regs_opt = new VirtualRegsOpt(func, this, trace_addr);
++    virtual_regs_opt = EcvNewVirtualRegsOpt(func, this, trace_addr);
+     virtual_regs_opt->func_name = func->getName().str();
+     VirtualRegsOpt::func_v_r_opt_map.insert({func, virtual_regs_opt});
+ 
+@@ -440,7 +472,7 @@
+     if (auto entry_block = &(func->front())) {
+       // Branch to the block of trace_addr.
+       DirectBranchWithSaveParents(GetOrCreateBlock(trace_addr), entry_block);
+-      auto entry_bb_reg_info_node = new BBRegInfoNode(func, state_ptr, runtime_ptr);
++      auto entry_bb_reg_info_node = EcvNewBBRegInfoNode(func, state_ptr, runtime_ptr);
+       CHECK(!virtual_regs_opt->bb_reg_info_node_map.contains(entry_block))
+           << "The entry block has been already added illegally to the VirtualRegsOpt.";
+       virtual_regs_opt->bb_reg_info_node_map.insert({entry_block, entry_bb_reg_info_node});
+@@ -470,7 +502,7 @@
+         continue;
+       }
+ 
+-      bb_reg_info_node = new BBRegInfoNode(func, state_ptr, runtime_ptr);
++      bb_reg_info_node = EcvNewBBRegInfoNode(func, state_ptr, runtime_ptr);
+       // map the block to the bb_reg_info_node
+       CHECK(!virtual_regs_opt->bb_reg_info_node_map.contains(block))
+           << "The block and the bb_reg_info_node have already been appended to the map.";
+@@ -658,7 +690,7 @@
+           br_bb = GetOrCreateIndirectJmpBlock();
+           if (!virtual_regs_opt->bb_reg_info_node_map.contains(br_bb)) {
+             virtual_regs_opt->bb_reg_info_node_map.insert(
+-                {br_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++                {br_bb, EcvNewBBRegInfoNode(func, state_ptr, runtime_ptr)});
+           }
+           br_blocks.push_back({block, FindIndirectBrAddress(block)});
+           /* jmp to indirectbr block */
+@@ -1165,7 +1197,13 @@
+     }
+ 
+     if (inst.lift_config.fork_emulation) {
+-      GenForkNearJump(trace_addr);
++      {
++        auto ecv_f0 = std::chrono::steady_clock::now();
++        GenForkNearJump(trace_addr);
++        ecv_fork_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                           std::chrono::steady_clock::now() - ecv_f0)
++                           .count();
++      }
+     } else if (br_bb) {
+       MainIndirectJumpCode(trace_addr);
+     } else {
+@@ -1214,7 +1252,13 @@
+   llvm::IRBuilder<> _near_jump_ir(_near_jump_bb);
+ 
+   // generate the IR code of indirectbr jump.
+-  GenIndirectJumpCode(trace_addr);
++  {
++    auto ecv_i0 = std::chrono::steady_clock::now();
++    GenIndirectJumpCode(trace_addr);
++    ecv_indirect_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                           std::chrono::steady_clock::now() - ecv_i0)
++                           .count();
++  }
+ 
+   _near_jump_ir.CreateBr(br_bb);
+   if (auto br_bb_phi = llvm::dyn_cast<llvm::PHINode>(&br_bb->front()); br_bb_phi) {
+@@ -1229,7 +1273,7 @@
+   virtual_regs_opt->bb_parents.at(org_first_bb).insert(_near_jump_bb);
+   // Add _near_jump_bb to the bb_reg_info_node_map.
+   virtual_regs_opt->bb_reg_info_node_map.insert(
+-      {_near_jump_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++      {_near_jump_bb, EcvNewBBRegInfoNode(func, state_ptr, runtime_ptr)});
+ }
+ 
+ void TraceLifter::Impl::GenIndirectJumpCode(uint64_t trace_addr) {
+@@ -1274,7 +1318,7 @@
+   // Update cache for `L_far_jump` block.
+   virtual_regs_opt->bb_parents.insert({far_jump_bb, {br_bb}});
+   virtual_regs_opt->bb_reg_info_node_map.insert(
+-      {far_jump_bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++      {far_jump_bb, EcvNewBBRegInfoNode(func, state_ptr, runtime_ptr)});
+   // Add basic block address of far_jump_bb to the grobal data array.
+   bb_addrs.push_back(llvm::BlockAddress::get(func, far_jump_bb));
+   bb_addr_vmas.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), UINT64_MAX));

@@ -1,0 +1,57 @@
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+index 6dab848..65941ff 100644
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -207,8 +207,23 @@ void AArch64TraceManager::SetELFData() {
+     for (size_t j = 0; j < s_t_addrs.size(); j++) {
+       auto func_size = disasm_funcs.contains(s_t_addrs[j]) ? disasm_funcs[s_t_addrs[j]].func_size
+                                                            : __wrap_main_size;
++      // raptormark: bound the scan to `.text`. The entry function is not
++      // guaranteed to live there at all -- in a fused image (a dynamic
++      // executable linked with its libraries by internal/fuse) the entry may sit
++      // in another merged section -- and even when it does, `func_size +
++      // extra_search_size` can run off the end of the section. Both cases
++      // indexed out of bounds before this guard.
++      if (text_section.sec_name.empty() || s_t_addrs[j] < text_section.vma ||
++          s_t_addrs[j] >= text_section.vma + text_section.size) {
++        continue;
++      }
+       auto _s_fn_bytes = &text_section.bytes[s_t_addrs[j] - text_section.vma];
+-      for (uint64_t i = 0; i + __wrap_main_size <= func_size + extra_search_size; i += 4) {
++      uint64_t search_size = func_size + extra_search_size;
++      uint64_t avail = text_section.vma + text_section.size - s_t_addrs[j];
++      if (search_size > avail) {
++        search_size = avail;
++      }
++      for (uint64_t i = 0; i + __wrap_main_size <= search_size; i += 4) {
+         if (/* nop or bti c */ ((_s_fn_bytes[i] == 0x1f && _s_fn_bytes[i + 1] == 0x20) ||
+                                 (_s_fn_bytes[i] == 0x5f && _s_fn_bytes[i + 1] == 0x24)) &&
+             _s_fn_bytes[i + 2] == 0x03 && _s_fn_bytes[i + 3] == 0xd5 &&
+@@ -225,8 +240,25 @@ void AArch64TraceManager::SetELFData() {
+     }
+   found_entry:
+     if (!__wrap_main_found) {
+-      elfconv_runtime_error("[ERROR] __wrap_main code block is not found. entry_point: 0x%lx\n",
+-                            entry_point);
++      // raptormark: not finding the trampoline is not an error.
++      //
++      // `nop / b main / nop` is an artifact of a STATIC glibc link: main's
++      // address is taken by __libc_start_call_main and reached through a BLR to
++      // this thunk, which carries no symbol of its own, so it has to be
++      // registered by hand or the indirect call has no lifted target.
++      //
++      // A dynamically linked executable -- including a fused image -- does not
++      // have that thunk, and does not need it: there `main` is a real symbol,
++      // so it is already discovered from the symbol table and registered like
++      // any other function, and the indirect call resolves through the normal
++      // _ecv_fun_vmas / _ecv_fun_ptrs tables at run time.
++      //
++      // Aborting here made every dynamic binary unliftable. Static binaries are
++      // unaffected: the pattern is found, so the thunk is still registered.
++      fprintf(stderr,
++              "[WARNING] __wrap_main thunk not found at entry_point: 0x%lx. "
++              "Assuming a dynamic/fused entry, where main is reached via a symbol.\n",
++              entry_point);
+     }
+   } else {
+     elfconv_runtime_error("[ERROR] Entry function is not defined.\n");

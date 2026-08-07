@@ -1,0 +1,57 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..86b4adb 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -6417,6 +6417,21 @@ bool TryDecodeMOVI_ASIMDIMM_D2_D(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// FMOV  <Vd>.2D, #<imm>
++// AdvSIMD modified-immediate FMOV (vector, immediate), 64-bit lanes (op=1,
++// cmode=1111, Q=1). The generated decoder stubs this to `return false`, so an
++// unlifted block traps at runtime. clang emits `fmov v.2d, #-1.0` for vectorized
++// struct init (e.g. RestrictInfo cost fields), which the query planner hits.
++// The abcdefgh imm8 expands to an IEEE-754 double via VFPExpandImmToFloat64
++// (returns the raw 64-bit pattern); both D lanes get that value, which is exactly
++// the MOVI_D2 (I64 replicate) semantic reused here.
++bool TryDecodeFMOV_ASIMDIMM_D2_D(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddRegOperand(inst, kActionWrite, kReg2D, kUseAsValue, data.Rd);
++  AddImmOperand(inst, VFPExpandImmToFloat64(data.imm8.uimm));
++  return true;
++}
++
+ // MOVI  <Vd>.<T>, #<imm8>{, LSL #0}
+ bool TryDecodeMOVI_ASIMDIMM_N_B(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..2fda69b 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -21863,10 +21863,8 @@ bool TryDecodeFMOV_ASIMDIMM_S_S(const InstData &, Instruction &) {
+ //  29 1 op       0
+ //  30 1 Q        0
+ //  31 0
+-// FMOV  <Vd>.2D, #<imm>
+-bool TryDecodeFMOV_ASIMDIMM_D2_D(const InstData &, Instruction &) {
+-  return false;
+-}
++// FMOV  <Vd>.2D, #<imm>  -- implemented in Arch.cpp (TryDecodeFMOV_ASIMDIMM_D2_D);
++// the generated `return false` stub is removed there so the real decoder links.
+ 
+ // FMIN FMIN_asimdsamefp16_only:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index 6650856..566e289 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1840,6 +1840,9 @@ DEF_SEM_T(BIC_L_SL, V dst_src, I32 src) {
+ }  // namespace
+ 
+ DEF_ISEL(MOVI_ASIMDIMM_D2_D) = MOVI_D2;  // MOVI  <Vd>.2D, #<imm>
++// FMOV <Vd>.2D, #<imm>: the decoder (Arch.cpp) expands the imm8 to the double's
++// 64-bit pattern, so replicating that I64 into both D lanes is the MOVI_D2 semantic.
++DEF_ISEL(FMOV_ASIMDIMM_D2_D) = MOVI_D2;  // FMOV  <Vd>.2D, #<imm>
+ DEF_ISEL(MOVI_ASIMDIMM_N_B_8B) = MOVI_N_B<VIu8v8>;  // MOVI  <Vd>.<T>, #<imm8>{, LSL #0}
+ DEF_ISEL(MOVI_ASIMDIMM_N_B_16B) = MOVI_N_B<VIu8v16>;  // MOVI  <Vd>.<T>, #<imm8>{, LSL #0}
+ DEF_ISEL(MOVI_ASIMDIMM_L_HL_4H) = MOVI_L_HL<VIu16v4>;  // MOVI  <Vd>.<T>, #<imm8>{, LSL #<amount>}

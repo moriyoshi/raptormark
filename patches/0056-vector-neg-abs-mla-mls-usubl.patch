@@ -1,0 +1,277 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index 29b0760..4decffb 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5742,6 +5742,69 @@ bool TryDecodeMUL_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   return TryDecodeRdW_Rn_Rm(data, inst, rclass);
+ }
+ 
++// MLA / MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T> -- multiply-accumulate and
++// multiply-subtract, SAME width throughout (unlike the ASIMDDIFF *L family).
++//
++// Operands are MUL's, except that the destination is an accumulator and so is
++// read-write. That one difference is the whole of it, and it is the one a
++// copy of MUL gets wrong silently.
++static bool TryDecodeMLXA_ASIMDSAME(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (0x3 == data.size) {
++    return false;  // `if size == '11' then ReservedValue();`
++  }
++  const uint64_t total_size = data.Q ? 128 : 64;
++  const uint64_t elem_size = 8UL << data.size;
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  auto rclass = ArrangementRegClass(total_size, elem_size);
++  AddRegOperand(inst, kActionReadWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
++bool TryDecodeMLA_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXA_ASIMDSAME(data, inst);
++}
++
++bool TryDecodeMLS_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXA_ASIMDSAME(data, inst);
++}
++
++// NEG / ABS  <Vd>.<T>, <Vn>.<T> -- the VECTOR integer sign operations.
++//
++// cryptography's Rust extension stops on `neg v28.2s, v31.2s` inside a
++// constant-time `cmov`. Unlike the float FNEG of patch 0053 these are real
++// arithmetic on integer lanes, so 64-bit elements ARE allowed -- but only with
++// Q=1, since the 1D arrangement is unallocated.
++static bool TryDecodeNEGABS_ASIMDMISC(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.size == 0x3 && !data.Q) {
++    return false;  // 1D is unallocated; 64-bit elements need Q=1.
++  }
++  const uint64_t total_size = data.Q ? 128 : 64;
++  const uint64_t elem_size = 8UL << data.size;
++  AddArrangementSpecifier(inst, total_size, elem_size);
++  auto rclass = ArrangementRegClass(total_size, elem_size);
++  AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeNEG_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeNEGABS_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeABS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeNEGABS_ASIMDMISC(data, inst);
++}
++
++// USUBL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb> -- widening unsigned subtract.
++// Operand shape is SADDL's exactly; only the operation and signedness differ.
++bool TryDecodeUSUBL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
++  return TryDecodeSADDL_ASIMDDIFF_L(data, inst);
++}
++
+ // SSHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ bool TryDecodeSSHL_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index c45f04a..f15dc14 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -1056,9 +1056,7 @@ bool TryDecodeABS_ASISDMISC_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // ABS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeABS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeABS_ASIMDMISC_R implemented in Arch.cpp.
+ 
+ // FMAX FMAX_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -3734,9 +3732,7 @@ bool TryDecodeUSRA_ASIMDSHF_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+-bool TryDecodeMLS_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeMLS_ASIMDSAME_ONLY implemented in Arch.cpp.
+ 
+ // ST1 ST1_asisdlse_R3_3v:
+ //   0 x Rt       0
+@@ -24617,9 +24613,7 @@ bool TryDecodeSTSETL_64S_MEMOP(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+-bool TryDecodeMLA_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeMLA_ASIMDSAME_ONLY implemented in Arch.cpp.
+ 
+ // LD3R LD3R_asisdlso_R3:
+ //   0 x Rt       0
+@@ -33535,9 +33529,7 @@ bool TryDecodeNEG_ASISDMISC_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // NEG  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeNEG_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeNEG_ASIMDMISC_R implemented in Arch.cpp.
+ 
+ // UMLAL UMLAL_asimddiff_L:
+ //   0 x Rd       0
+@@ -35975,9 +35967,7 @@ bool TryDecodeFNEG_H_FLOATDP1(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // USUBL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+-bool TryDecodeUSUBL_ASIMDDIFF_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUSUBL_ASIMDDIFF_L implemented in Arch.cpp.
+ 
+ // SHA1C SHA1C_QSV_cryptosha3:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index c6bc95f..2b9f370 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -2440,6 +2440,100 @@ ECV_MAKE_ADALP(SADALP, S, int, 32, 64);
+ #undef ECV_MAKE_ADDLP
+ #undef ECV_MAKE_ADALP
+ 
++// NEG / ABS (vector integer), and MLA / MLS (same-width multiply-accumulate).
++//
++// Read as SIGNED lanes: ABS is only meaningful signed, and NEG of the most
++// negative value must wrap to itself rather than saturate (that is SQNEG, a
++// different instruction and still a stub). MLA/MLS wrap on overflow too.
++// Token pasting does not happen inside a macro ARGUMENT, so the operation
++// cannot be passed in -- NEG and ABS get one macro each.
++#define ECV_MAKE_NEG(esize) \
++  template <typename S> \
++  DEF_SEM_T(NEG_Vec_##esize, S src) { \
++    auto res = SReadVI##esize(src); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] = static_cast<int##esize##_t>(static_cast<int##esize##_t>(0) - res[i]); \
++    } \
++    return res; \
++  }
++
++#define ECV_MAKE_ABS(esize) \
++  template <typename S> \
++  DEF_SEM_T(ABS_Vec_##esize, S src) { \
++    auto res = SReadVI##esize(src); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      if (res[i] < 0) { \
++        res[i] = static_cast<int##esize##_t>(static_cast<int##esize##_t>(0) - res[i]); \
++      } \
++    } \
++    return res; \
++  }
++
++ECV_MAKE_NEG(8)
++ECV_MAKE_NEG(16)
++ECV_MAKE_NEG(32)
++ECV_MAKE_NEG(64)
++ECV_MAKE_ABS(8)
++ECV_MAKE_ABS(16)
++ECV_MAKE_ABS(32)
++ECV_MAKE_ABS(64)
++
++#undef ECV_MAKE_NEG
++#undef ECV_MAKE_ABS
++
++#define ECV_MAKE_MLXA(name, op, esize) \
++  template <typename S> \
++  DEF_SEM_T(name##_##esize, S dst, S srcn, S srcm) { \
++    auto srcn_v = UReadVI##esize(srcn); \
++    auto srcm_v = UReadVI##esize(srcm); \
++    auto res = UReadVI##esize(dst); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] op uint##esize##_t(srcn_v[i] * srcm_v[i]); \
++    } \
++    return res; \
++  }
++
++ECV_MAKE_MLXA(MLA_Vec, +=, 8)
++ECV_MAKE_MLXA(MLA_Vec, +=, 16)
++ECV_MAKE_MLXA(MLA_Vec, +=, 32)
++ECV_MAKE_MLXA(MLS_Vec, -=, 8)
++ECV_MAKE_MLXA(MLS_Vec, -=, 16)
++ECV_MAKE_MLXA(MLS_Vec, -=, 32)
++
++#undef ECV_MAKE_MLXA
++
++// USUBL{2}: widening unsigned subtract. Widened BEFORE the subtract, so a
++// smaller-minus-larger pair gives a large positive wide value rather than a
++// truncated one -- the same ordering the widening multiplies of 0051 needed.
++#define ECV_MAKE_USUBL(s_esize, d_esize) \
++  template <typename D, typename S> \
++  DEF_SEM_T(USUBL_##s_esize, S srcn, S srcm) { \
++    auto srcn_v = UReadVI##s_esize(srcn); \
++    auto srcm_v = UReadVI##s_esize(srcm); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] = uint##d_esize##_t(srcn_v[i]) - uint##d_esize##_t(srcm_v[i]); \
++    } \
++    return res; \
++  } \
++  template <typename D, typename S> \
++  DEF_SEM_T(USUBL2_##s_esize, S srcn, S srcm) { \
++    auto srcn_v = UReadVI##s_esize(srcn); \
++    auto srcm_v = UReadVI##s_esize(srcm); \
++    D res{}; \
++    auto n = GetVectorElemsNum(res); \
++    _Pragma("unroll") for (size_t i = 0; i < n; i++) { \
++      res[i] = uint##d_esize##_t(srcn_v[i + n]) - uint##d_esize##_t(srcm_v[i + n]); \
++    } \
++    return res; \
++  }
++
++ECV_MAKE_USUBL(8, 16)
++ECV_MAKE_USUBL(16, 32)
++ECV_MAKE_USUBL(32, 64)
++
++#undef ECV_MAKE_USUBL
++
+ MAKE_MULL(UMULL, U, uint, 8, 16);
+ MAKE_MULL(UMULL, U, uint, 16, 32);
+ MAKE_MULL(UMULL, U, uint, 32, 64);
+@@ -2487,6 +2581,38 @@ DEF_ISEL(SADALP_ASIMDMISC_P_4S8H) = SADALP_16<VIi32v4, VIi16v8>;  // SADALP  <Vd
+ DEF_ISEL(SADALP_ASIMDMISC_P_1D2S) = SADALP_32<VIi64v1, VIi32v2>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
+ DEF_ISEL(SADALP_ASIMDMISC_P_2D4S) = SADALP_32<VIi64v2, VIi32v4>;  // SADALP  <Vd>.<Ta>, <Vn>.<Tb>
+ 
++DEF_ISEL(NEG_ASIMDMISC_R_8B) = NEG_Vec_8<VIi8v8>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(NEG_ASIMDMISC_R_16B) = NEG_Vec_8<VIi8v16>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(NEG_ASIMDMISC_R_4H) = NEG_Vec_16<VIi16v4>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(NEG_ASIMDMISC_R_8H) = NEG_Vec_16<VIi16v8>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(NEG_ASIMDMISC_R_2S) = NEG_Vec_32<VIi32v2>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(NEG_ASIMDMISC_R_4S) = NEG_Vec_32<VIi32v4>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(NEG_ASIMDMISC_R_2D) = NEG_Vec_64<VIi64v2>;  // NEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_8B) = ABS_Vec_8<VIi8v8>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_16B) = ABS_Vec_8<VIi8v16>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_4H) = ABS_Vec_16<VIi16v4>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_8H) = ABS_Vec_16<VIi16v8>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_2S) = ABS_Vec_32<VIi32v2>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_4S) = ABS_Vec_32<VIi32v4>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(ABS_ASIMDMISC_R_2D) = ABS_Vec_64<VIi64v2>;  // ABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(MLA_ASIMDSAME_ONLY_8B) = MLA_Vec_8<VIu8v8>;  // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLA_ASIMDSAME_ONLY_16B) = MLA_Vec_8<VIu8v16>;  // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLA_ASIMDSAME_ONLY_4H) = MLA_Vec_16<VIu16v4>;  // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLA_ASIMDSAME_ONLY_8H) = MLA_Vec_16<VIu16v8>;  // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLA_ASIMDSAME_ONLY_2S) = MLA_Vec_32<VIu32v2>;  // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLA_ASIMDSAME_ONLY_4S) = MLA_Vec_32<VIu32v4>;  // MLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLS_ASIMDSAME_ONLY_8B) = MLS_Vec_8<VIu8v8>;  // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLS_ASIMDSAME_ONLY_16B) = MLS_Vec_8<VIu8v16>;  // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLS_ASIMDSAME_ONLY_4H) = MLS_Vec_16<VIu16v4>;  // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLS_ASIMDSAME_ONLY_8H) = MLS_Vec_16<VIu16v8>;  // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLS_ASIMDSAME_ONLY_2S) = MLS_Vec_32<VIu32v2>;  // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(MLS_ASIMDSAME_ONLY_4S) = MLS_Vec_32<VIu32v4>;  // MLS  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
++DEF_ISEL(USUBL_ASIMDDIFF_L_8H8B) = USUBL_8<VIu16v8, VIu8v8>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
++DEF_ISEL(USUBL_ASIMDDIFF_L_8H16B) = USUBL2_8<VIu16v8, VIu8v16>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
++DEF_ISEL(USUBL_ASIMDDIFF_L_4S4H) = USUBL_16<VIu32v4, VIu16v4>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
++DEF_ISEL(USUBL_ASIMDDIFF_L_4S8H) = USUBL2_16<VIu32v4, VIu16v8>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
++DEF_ISEL(USUBL_ASIMDDIFF_L_2D2S) = USUBL_32<VIu64v2, VIu32v2>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
++DEF_ISEL(USUBL_ASIMDDIFF_L_2D4S) = USUBL2_32<VIu64v2, VIu32v4>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+ DEF_ISEL(UMULL_ASIMDDIFF_L_8H8B) = UMULL_8<VIu16v8, VIu8v8>;
+ DEF_ISEL(UMULL_ASIMDDIFF_L_4S4H) = UMULL_16<VIu32v4, VIu16v4>;
+ DEF_ISEL(UMULL_ASIMDDIFF_L_2D2S) = UMULL_32<VIu64v2, VIu32v2>;

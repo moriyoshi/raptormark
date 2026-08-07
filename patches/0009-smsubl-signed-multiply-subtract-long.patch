@@ -1,0 +1,66 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..0df1cfe 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -15351,8 +15351,11 @@ bool TryDecodeFMLA_ASIMDSAMEFP16_ONLY(const InstData &, Instruction &) {
+ //  30 0 op54     1
+ //  31 1 sf       0
+ // SMNEGL  <Xd>, <Wn>, <Wm>
+-bool TryDecodeSMNEGL_SMSUBL_64WA_DP_3SRC(const InstData &, Instruction &) {
+-  return false;
++bool TryDecodeSMNEGL_SMSUBL_64WA_DP_3SRC(const InstData &data, Instruction &inst) {
++  // SMNEGL  <Xd>, <Wn>, <Wm>  ==  SMSUBL <Xd>, <Wn>, <Wm>, XZR. UMSUBL's decode
++  // reads Ra as an X reg; Ra==31 is XZR(0), so the SMSUBL semantics give -(Wn*Wm).
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  return TryDecodeUMSUBL_64WA_DP_3SRC(data, inst);
+ }
+ 
+ 
+@@ -30459,8 +30462,15 @@ bool TryDecodeSYSL_RC_SYSTEM(const InstData &, Instruction &) {
+ //  30 0 op54     1
+ //  31 1 sf       0
+ // SMSUBL  <Xd>, <Wn>, <Wm>, <Xa>
+-bool TryDecodeSMSUBL_64WA_DP_3SRC(const InstData &, Instruction &) {
+-  return false;
++bool TryDecodeSMSUBL_64WA_DP_3SRC(const InstData &data, Instruction &inst) {
++  // SMSUBL  <Xd>, <Wn>, <Wm>, <Xa>  -- signed multiply-subtract long. Same operand
++  // layout as UMSUBL (Xd<-Rd, Wn<-Rn, Wm<-Rm, Xa<-Ra); only the lifting semantics
++  // differ (signed). The pinned remill left this a `return false` stub, so the
++  // lifter silently dropped the instruction and its basic block, surfacing as an
++  // "__ecv_warning: no lifted instruction" abort in OpenSSL's OBJ_obj2txt (OID arc
++  // encoding: first_arc -= 40). See raptormark patches/0009.
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  return TryDecodeUMSUBL_64WA_DP_3SRC(data, inst);
+ }
+ 
+ // URSRA URSRA_asisdshf_R:
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp b/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
+index a847bbf..217456c 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
+@@ -163,6 +163,16 @@ DEF_SEM_U64(SMADDL, R32 src1, R32 src2, R64 src3) {
+   return Unsigned(SAdd(operand3, SMul(operand1, operand2)));
+ }
+ 
++// SMSUBL  <Xd>, <Wn>, <Wm>, <Xa>  -- signed multiply-subtract long (mirrors SMADDL
++// with SSub). Added by raptormark patches/0009; the pinned remill declared but
++// never implemented it, breaking OpenSSL OID handling. See Decode.cpp.
++DEF_SEM_U64(SMSUBL, R32 src1, R32 src2, R64 src3) {
++  auto operand1 = SExt(Signed(Read(src1)));
++  auto operand2 = SExt(Signed(Read(src2)));
++  auto operand3 = Signed(Read(src3));
++  return Unsigned(SSub(operand3, SMul(operand1, operand2)));
++}
++
+ // UMULH  <Xd>, <Xn>, <Xm>
+ DEF_SEM_U64(UMULH, R64 src1, R64 src2) {
+   uint128_t lhs = ZExt(Read(src1));
+@@ -223,6 +233,8 @@ DEF_ISEL(UMADDL_64WA_DP_3SRC) = UMADDL;  // UMADDL  <Xd>, <Wn>, <Wm>, <Xa>
+ DEF_ISEL(SMADDL_64WA_DP_3SRC) = SMADDL;  // SMADDL  <Xd>, <Wn>, <Wm>, <Xa>
+ 
+ DEF_ISEL(UMSUBL_64WA_DP_3SRC) = UMSUBL;  // UMSUBL  <Xd>, <Wn>, <Wm>, <Xa>
++DEF_ISEL(SMSUBL_64WA_DP_3SRC) = SMSUBL;  // SMSUBL  <Xd>, <Wn>, <Wm>, <Xa>
++DEF_ISEL(SMNEGL_SMSUBL_64WA_DP_3SRC) = SMSUBL;  // SMNEGL  <Xd>, <Wn>, <Wm>
+ 
+ DEF_ISEL(UMULH_64_DP_3SRC) = UMULH;  // UMULH  <Xd>, <Xn>, <Xm>
+ DEF_ISEL(SMULH_64_DP_3SRC) = SMULH;

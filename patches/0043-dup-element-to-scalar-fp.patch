@@ -1,0 +1,87 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..b9e35fc 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5755,8 +5755,21 @@ bool TryDecodeMOV_DUP_ASISDONE_ONLY(const InstData &data, Instruction &inst) {
+       break;
+     default: return false;
+   }
++  // The destination is an FP/SIMD SCALAR register (Bd/Hd/Sd/Dd), NOT a
++  // general-purpose one -- that is the whole difference between this and UMOV,
++  // which shares the extraction but writes Wd. Declaring Wd/Xd here put the
++  // lane in x<d> and left the FP register untouched, so a guest reading lane 1
++  // of a float vector got whatever was in s<d> already, normally zero. Silent,
++  // and reached by ordinary compiler output: `mov s0, v0.s[1]`.
++  // B and H destinations go to kRegS, not kRegB/kRegH. Architecturally
++  // `MOV <Bd>, <Vn>.B[i]` sets Vd = ZeroExtend(element, 128), and writing the
++  // zero-extended byte to Sd produces exactly that same Vd -- while kRegB has
++  // no write path modelled anywhere in this decoder. The postgres closure has
++  // 13 `mov b|h` element sites, so refusing them instead would trade a silent
++  // wrong answer for 13 new hard stops.
++  RegClass dclass = (size == 3) ? kRegD : kRegS;
+   inst.function = ss.str();
+-  AddRegOperand(inst, kActionWrite, size == 3 ? kRegX : kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionWrite, dclass, kUseAsValue, data.Rd);
+   AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
+   AddImmOperand(inst, data.imm5.uimm >> (size + 1));
+   return true;
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+index 6650856..137257a 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/DATAXFER.cpp
+@@ -1757,15 +1757,46 @@ DEF_ISEL(UMOV_ASIMDINS_W_W_H) = UMovFromVec16<uint32_t>;  // UMOV  <Wd>, <Vn>.<T
+ DEF_ISEL(UMOV_ASIMDINS_W_W_S) = UMovFromVec32<uint32_t>;  // UMOV  <Wd>, <Vn>.<Ts>[<index>]
+ DEF_ISEL(UMOV_ASIMDINS_X_X_D) = UMovFromVec64<uint64_t>;  // UMOV  <Xd>, <Vn>.<Ts>[<index>]
+ 
+-DEF_ISEL(MOV_DUP_ASISDONE_ONLY_B) = UMovFromVec8<uint32_t>;  // MOV  <V><d>, <Vn>.<T>[<index>]
+-DEF_ISEL(MOV_DUP_ASISDONE_ONLY_H) = UMovFromVec16<uint32_t>;  // MOV  <V><d>, <Vn>.<T>[<index>]
+-DEF_ISEL(MOV_DUP_ASISDONE_ONLY_S) = UMovFromVec32<uint32_t>;  // MOV  <V><d>, <Vn>.<T>[<index>]
+-DEF_ISEL(MOV_DUP_ASISDONE_ONLY_D) = UMovFromVec64<uint64_t>;  // MOV  <V><d>, <Vn>.<T>[<index>]
+-
+-DEF_ISEL(DUP_ASISDONE_ONLY_B) = UMovFromVec8<uint32_t>;  // DUP  <V><d>, <Vn>.<T>[<index>]
+-DEF_ISEL(DUP_ASISDONE_ONLY_H) = UMovFromVec16<uint32_t>;  // DUP  <V><d>, <Vn>.<T>[<index>]
+-DEF_ISEL(DUP_ASISDONE_ONLY_S) = UMovFromVec32<uint32_t>;  // DUP  <V><d>, <Vn>.<T>[<index>]
+-DEF_ISEL(DUP_ASISDONE_ONLY_D) = UMovFromVec64<uint64_t>;  // DUP  <V><d>, <Vn>.<T>[<index>]
++// MOV/DUP  <V><d>, <Vn>.<T>[<index>] -- extract one lane into an FP/SIMD SCALAR
++// register. Same extraction as UMOV above, different DESTINATION FILE: these
++// return through DEF_SEM_F32/F64 so the value reaches Sd/Dd. Bound to the GPR
++// UMovFromVec* semantics, they wrote x<d> and left s<d> as it was.
++//
++// The bits are moved, not converted -- `mov s0, v0.s[1]` is a copy -- so this
++// reinterprets rather than casts, the same idiom FMOV_I32ToF32 uses.
++namespace {
++
++DEF_SEM_F32(FMovFromVec8, VIu8v16 src, I64 index) {
++  uint32_t bits = UExtractVI8(UReadVI8(src), Read(index));
++  return *reinterpret_cast<float32_t *>(&bits);
++}
++
++DEF_SEM_F32(FMovFromVec16, VIu16v8 src, I64 index) {
++  uint32_t bits = UExtractVI16(UReadVI16(src), Read(index));
++  return *reinterpret_cast<float32_t *>(&bits);
++}
++
++DEF_SEM_F32(FMovFromVec32, VIu32v4 src, I64 index) {
++  auto bits = UExtractVI32(UReadVI32(src), Read(index));
++  return *reinterpret_cast<float32_t *>(&bits);
++}
++
++DEF_SEM_F64(FMovFromVec64, VIu64v2 src, I64 index) {
++  auto bits = UExtractVI64(UReadVI64(src), Read(index));
++  return *reinterpret_cast<float64_t *>(&bits);
++}
++
++}  // namespace
++
++DEF_ISEL(MOV_DUP_ASISDONE_ONLY_B) = FMovFromVec8;  // MOV  <Bd>, <Vn>.B[<index>]
++DEF_ISEL(MOV_DUP_ASISDONE_ONLY_H) = FMovFromVec16;  // MOV  <Hd>, <Vn>.H[<index>]
++DEF_ISEL(MOV_DUP_ASISDONE_ONLY_S) = FMovFromVec32;  // MOV  <Sd>, <Vn>.S[<index>]
++DEF_ISEL(MOV_DUP_ASISDONE_ONLY_D) = FMovFromVec64;  // MOV  <Dd>, <Vn>.D[<index>]
++
++DEF_ISEL(DUP_ASISDONE_ONLY_B) = FMovFromVec8;  // DUP  <Bd>, <Vn>.B[<index>]
++DEF_ISEL(DUP_ASISDONE_ONLY_H) = FMovFromVec16;  // DUP  <Hd>, <Vn>.H[<index>]
++DEF_ISEL(DUP_ASISDONE_ONLY_S) = FMovFromVec32;  // DUP  <Sd>, <Vn>.S[<index>]
++DEF_ISEL(DUP_ASISDONE_ONLY_D) = FMovFromVec64;  // DUP  <Dd>, <Vn>.D[<index>]
+ 
+ DEF_ISEL(SMOV_ASIMDINS_W_W_B) = SMovFromVec8<int32_t>;  // UMOV  <Wd>, <Vn>.<Ts>[<index>]
+ DEF_ISEL(SMOV_ASIMDINS_W_W_H) = SMovFromVec16<int32_t>;  // UMOV  <Wd>, <Vn>.<Ts>[<index>]

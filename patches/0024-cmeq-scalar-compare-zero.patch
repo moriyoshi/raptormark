@@ -1,0 +1,62 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..85466c5 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5434,6 +5434,19 @@ bool TryDecodeCMGE_ASISDMISC_Z(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// CMEQ  <V><d>, <V><n>, #0 (scalar). The vector form above is implemented; only
++// the 1D scalar was left as a generated stub, and clang emits it for a plain
++// 64-bit "is this zero" -- musl and nginx both reach it on ordinary code paths.
++bool TryDecodeCMEQ_ASISDMISC_Z(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.size != 0b11) {
++    return false;  // size must be 0b11
++  }
++  AddRegOperand(inst, kActionWrite, kReg1D, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kReg1D, kUseAsValue, data.Rn);
++  return true;
++}
++
+ // CMEQ  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ bool TryDecodeCMEQ_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..f8eed97 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -10345,9 +10345,7 @@ bool TryDecodeCMLE_ASISDMISC_Z(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // CMEQ  <V><d>, <V><n>, #0
+-bool TryDecodeCMEQ_ASISDMISC_Z(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCMEQ_ASISDMISC_Z: implemented in Arch.cpp (scalar compare-equal-to-zero).
+ 
+ // LDUMAXAH LDUMAXAH_32_memop:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index f35c709..3b11d42 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -419,6 +419,18 @@ DEF_ISEL(CMGE_ASISDMISC_Z) = CMGE_ASISDMISC_ONLYD;  // CMGE  <V><d>, <V><n>, #0
+ 
+ namespace {
+ 
++DEF_SEM_T(CMEQ_ASISDMISC_ONLYD, VIi64v1 src) {
++  auto src_v = SReadVI64(src);
++  int64_t element = src_v[0];
++  return element == 0 ? ~0ULL : 0ULL;
++}
++
++}  // namespace
++
++DEF_ISEL(CMEQ_ASISDMISC_Z) = CMEQ_ASISDMISC_ONLYD;  // CMEQ  <V><d>, <V><n>, #0
++
++namespace {
++
+ #define MAKE_CMP_BROADCAST(op, prefix, binop, size) \
+   template <typename SV, typename V> \
+   DEF_SEM_T(op##_##size, SV src1, SV src2) { \

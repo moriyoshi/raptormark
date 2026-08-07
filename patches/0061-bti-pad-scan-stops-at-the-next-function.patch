@@ -1,0 +1,42 @@
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+index 98e6202..0dde84d 100644
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -193,6 +193,37 @@ void AArch64TraceManager::CollectBTIJumpPads(uint64_t lo, uint64_t hi, std::vect
+   if (next_c != bti_c_vmas.end()) {
+     limit = std::min(limit, *next_c);  // stop BEFORE the next function entry
+   }
++  // raptormark: `bti c` alone is NOT a function boundary, so the bound above does
++  // not do what its comment claims. `bti c` marks INDIRECT-CALL targets; a
++  // function nothing indirect-calls begins with `paciasp` and carries no landing
++  // pad at all. Measured on the fused images: 2,213 of bin_echo's 3,890 entries
++  // and 37,065 of postgres's 60,290 start with `paciasp`, so the scan runs
++  // straight through them.
++  //
++  // What it then seeds is an INTERIOR address of a later function, and decoding
++  // from an interior address walks that function's whole body into the caller.
++  // `__vfscanf` (60 bytes, 15 instructions) scanned 36,444 bytes to the next
++  // `bti c`, seeded 33 pads all interior to `_ecv_fde_657240`, and was emitted
++  // with 8,929 basic blocks -- 8,913 of them the callee's. The callee's ENTRY is
++  // never seeded, so the `bl` to it is still a call and the copy carries no entry
++  // block, which is the fingerprint that identified this.
++  //
++  // The symbol table already answers "where does the next function start", it
++  // needs no `st_size` (so unlike a `GetFuncVMA_E` bound it cannot truncate a
++  // function whose declared size understates its body -- that would cut 20 real
++  // functions on bash and 11 on postgres), and an in-function gap such as
++  // `base_yyparse`'s ~40 KB action table stays inside the entry-to-next-entry
++  // range by construction, so the scan keeps doing its job.
++  //
++  // `disasm_funcs` ONLY, deliberately. `rest_disasm_funcs` is filled during
++  // lifting, so bounding by it would make the answer depend on lift order and the
++  // emitted bitcode would stop being deterministic -- which the object cache and
++  // `patches/0029` both rely on. Excluding it can only leave the bound wider than
++  // necessary, never narrower.
++  const auto next_fn = disasm_funcs.lower_bound(static_cast<uintptr_t>(lo));
++  if (next_fn != disasm_funcs.end()) {
++    limit = std::min(limit, static_cast<uint64_t>(next_fn->first));
++  }
+ 
+   for (auto it = std::lower_bound(bti_j_vmas.begin(), bti_j_vmas.end(), lo);
+        it != bti_j_vmas.end() && *it < limit; ++it) {

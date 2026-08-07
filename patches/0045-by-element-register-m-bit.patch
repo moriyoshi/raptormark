@@ -1,0 +1,75 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..4f518fb 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -5563,6 +5563,36 @@ bool TryDecodeFMLA_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+ }
+ 
+ // FMLA  <Vd>.<T>, <Vn>.<T>, <Vm>.<Ts>[<index>]
++// The element register of a by-element ASIMD instruction is FIVE bits, split:
++// `Rm` holds [19:16] and the `M` bit at [20] is the top one. Using `data.Rm`
++// alone silently reads the register 16 lower, so `v31.s[0]` becomes V15 -- and
++// nothing in this decoder referenced `data.M` at all.
++//
++// Silent because it is only wrong for V16-V31: a compiler that happens to
++// allocate a low register produces correct code, which is why this survived.
++// It is what stopped postgres -- ICU's `(int32_t)(length * ratio)` compiles to
++// `fmul v30.2s, v30.2s, v31.s[0]`, and reading V15 made a hash table's
++// highWaterMark zero, so every insert looked like an overflow and the table
++// rehashed to the top of ICU's PRIMES on the way to a 48 GB allocation.
++//
++// Half-precision (`_RH_H`) forms are DIFFERENT -- there M is part of the index
++// and the register really is 4 bits -- so this must not be applied to them.
++// They are decode stubs today; a future implementation needs its own rule.
++static aarch64::RegNum ByElementRegNum(const InstData &data) {
++  return static_cast<aarch64::RegNum>((static_cast<uint8_t>(data.M) << 4) |
++                                      static_cast<uint8_t>(data.Rm));
++}
++
++// The 2S arrangement can name lanes 2 and 3 of the element register, because
++// the index is H:L regardless of Q. The semantics take both operands as the
++// same arrangement type, so a 64-bit view cannot express those lanes. Refuse
++// rather than read out of range: `_ecv_unreached` is loud, and reading a lane
++// that is not there is exactly the class of silent wrongness above.
++static bool ByElementIndexFits(const InstData &data, int index) {
++  const bool is_2s = (0 == data.sz) && (0 == data.Q);
++  return !(is_2s && index > 1);
++}
++
+ bool TryDecodeFMLA_ASIMDELEM_R_SD(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::State;
+   uint64_t total_size, elem_size, index;
+@@ -5581,11 +5611,15 @@ bool TryDecodeFMLA_ASIMDELEM_R_SD(const InstData &data, Instruction &inst) {
+     std::__throw_runtime_error(
+         "[ERROR] invalid 'sz' or 'L' of InstData at TryDecodeFMLA_ASIMDELEM_R_SD\n");
+   }
++  if (!ByElementIndexFits(data, static_cast<int>(index))) {
++    return false;
++  }
+   AddArrangementSpecifier(inst, total_size, elem_size);
+   auto rclass = ArrangementRegClass(total_size, elem_size, true);
+   AddRegOperand(inst, kActionReadWrite, rclass, kUseAsValue, data.Rd);
+   AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
+-  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rm);
++  // M:Rm, not Rm -- see ByElementRegNum.
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, ByElementRegNum(data));
+   AddImmOperand(inst, index, kUnsigned, 64);
+   if (inst.lift_config.float_exception_enabled) {
+     AddArrangementSpecifierFPSRStatus(inst);
+@@ -5670,11 +5704,15 @@ bool TryDecodeFMUL_ASIMDELEM_R_SD(const InstData &data, Instruction &inst) {
+     std::__throw_runtime_error(
+         "[ERROR] invalid 'sz' or 'L' of InstData at TryDecodeFMUL_ASIMDELEM_R_SD\n");
+   }
++  if (!ByElementIndexFits(data, index)) {
++    return false;
++  }
+   AddArrangementSpecifier(inst, total_size, elem_size);
+   auto rclass = ArrangementRegClass(total_size, elem_size, true);
+   AddRegOperand(inst, kActionWrite, rclass, kUseAsValue, data.Rd);
+   AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rn);
+-  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, data.Rm);
++  // M:Rm, not Rm -- see ByElementRegNum.
++  AddRegOperand(inst, kActionRead, rclass, kUseAsValue, ByElementRegNum(data));
+   AddImmOperand(inst, index, kUnsigned, 32);
+   if (inst.lift_config.float_exception_enabled) {
+     AddArrangementSpecifierFPSRStatus(inst);

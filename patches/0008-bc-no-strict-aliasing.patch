@@ -1,0 +1,18 @@
+diff --git a/backend/remill/cmake/BCCompiler.cmake b/backend/remill/cmake/BCCompiler.cmake
+--- a/backend/remill/cmake/BCCompiler.cmake
++++ b/backend/remill/cmake/BCCompiler.cmake
+@@ -15,6 +15,14 @@ set(DEFAULT_BC_COMPILER_FLAGS
+   -Wno-ignored-attributes -fno-vectorize -fno-slp-vectorize
+   -Wno-variadic-macros -Wno-c11-extensions -Wno-c++11-extensions
+   -ffreestanding -fno-common -fno-builtin -fno-exceptions -fno-rtti
++  # elfconv/raptormark: the lifted memory helpers (StorePair64, LDP_Q, ...) all
++  # access ONE flat guest arena but type-pun it through different C scalar types
++  # (uint64_t, __int128, ...). Under strict aliasing clang tags these with
++  # distinct TBAA ("long" vs "__int128"), so LLVM treats overlapping accesses of
++  # different widths to the same address as non-aliasing and miscompiles
++  # GP-store -> SIMD-reload (e.g. a va_list built by `stp x,x` then reloaded by
++  # `ldp q,q` reads stale bytes). Disable it so all arena accesses may-alias.
++  -fno-strict-aliasing
+   -fno-asynchronous-unwind-tables -Wno-unneeded-internal-declaration
+   -Wno-unused-function -Wgnu-inline-cpp-without-extern
+   -Wno-pass-failed=transform-warning

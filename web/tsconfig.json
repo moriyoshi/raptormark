@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    // ES2024 for `Atomics.waitAsync`, which the socket worker depends on: it is
+    // what lets that thread wait for requests WITHOUT blocking its own event
+    // loop, and a blocking wait there deadlocks every socket operation.
+    "target": "ES2024",
+    // `DOM.Iterable` is separate from `DOM` and is not optional here: without it
+    // `Headers` has no `[Symbol.iterator]`, and `[...request.headers]` -- how a
+    // request's headers reach the wire type in `sw.ts` -- does not compile. It
+    // only adds iterator declarations to types `DOM` already provides.
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+
+    // ⚠️ Node runs these files by STRIPPING types, not by compiling them: there is
+    // no build step on the Node path (`node bin/run.ts` just works on Node >= 22.6).
+    // Stripping can only erase syntax, so `enum`, `namespace`, parameter
+    // properties and decorators are unavailable -- use `const` objects and plain
+    // assignments instead. This flag makes tsc reject those at typecheck time
+    // rather than letting node fail at run time with a much worse message.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/**/*.ts", "bin/**/*.ts"]
+}

@@ -1,0 +1,71 @@
+raptormark: pick one alias per address deterministically.
+
+ELFObject::LoadELF sorts func_symbols by address alone. The vector holds every
+BSF_FUNCTION symbol LoadStaticSymbolsBFD found plus everything the eh_frame
+recovery contributed, so an address named by several symbols appears several
+times -- glibc aliases heavily (newlocale/__newlocale, raise/gsignal,
+ldiv/imaxdiv, strfromf128/strfromf64x). SetELFData then keeps the FIRST entry of
+each address run, because disasm_funcs.emplace() does not overwrite.
+
+std::sort is not stable, so which alias survived was decided by introsort's
+partitioning of the whole vector, and that depends on the vector's length. Two
+programs fused from one rootfs contain the same libraries but different numbers
+of their own functions, so the same library function was named strfromf128 in
+one and strfromf64x in the other.
+
+Measured on Debian /bin/echo and /bin/cat fused with a shared library layout:
+both lift 4176 library functions at 4176 IDENTICAL addresses -- the sets differ
+by zero -- yet 68 of them came out under different names. With patches/0046
+making the lifted name address-derived, that is the difference between two
+programs sharing a compiled partition and not; it reached 66 of the 80
+partitions, and it was misread once as the lifter reaching different code in the
+two programs, which it does not.
+
+Ordering by (addr, sym_name, size) makes the survivor a function of the symbol
+set alone. Which alias wins is arbitrary and does not matter -- the lifted name
+carries the address, and the symbol name in front of it is a diagnostic aid.
+That the same one wins in every program is the point.
+--- a/lifter/Binary/Loader.cpp
++++ b/lifter/Binary/Loader.cpp
+@@ -247,8 +247,39 @@
+   for (auto &[_, symbol] : func_symbols_map) {
+     func_symbols.emplace_back(symbol);
+   }
+-  std::sort(func_symbols.begin(), func_symbols.end(),
+-            [](auto const &lhs, auto const &rhs) { return lhs.addr < rhs.addr; });
++  // A TOTAL order, not just an ordering by address.
++  //
++  // Several symbols can name one address -- glibc is full of aliases
++  // (`newlocale`/`__newlocale`, `raise`/`gsignal`, `ldiv`/`imaxdiv`), and this
++  // vector holds every one of them, because LoadStaticSymbolsBFD appends each
++  // BSF_FUNCTION symbol directly while the eh_frame recovery adds its own
++  // entries through func_symbols_map. Only the FIRST symbol of each address run
++  // survives: SetELFData builds disasm_funcs with emplace(), which does not
++  // overwrite.
++  //
++  // Comparing on addr alone leaves the order within a run to std::sort, which
++  // is not stable, so the survivor was decided by introsort's partitioning of
++  // the whole vector -- and that depends on the vector's LENGTH. Two programs
++  // fused from one rootfs share every library symbol but have different numbers
++  // of their own, so the same library function was named `strfromf128` in one
++  // program and `strfromf64x` in the other. Measured on Debian /bin/echo and
++  // /bin/cat: identical library code at 4176 identical addresses, of which 68
++  // came out under different names. Since patches/0046 makes the lifted name
++  // address-derived, that difference is the whole reason the two programs could
++  // not share a compiled partition -- it reached 66 of 80 partitions.
++  //
++  // Ordering by (addr, sym_name, size) makes the survivor a function of the
++  // symbol set alone. Which alias wins does not matter; that it is the same one
++  // in every program does.
++  std::sort(func_symbols.begin(), func_symbols.end(), [](auto const &lhs, auto const &rhs) {
++    if (lhs.addr != rhs.addr) {
++      return lhs.addr < rhs.addr;
++    }
++    if (lhs.sym_name != rhs.sym_name) {
++      return lhs.sym_name < rhs.sym_name;
++    }
++    return lhs.size < rhs.size;
++  });
+ 
+   /* get every dynamic symbol table */
+   // LoadDynamicSymbolsBFD(); /* FIXME */

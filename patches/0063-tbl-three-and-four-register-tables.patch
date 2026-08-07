@@ -1,0 +1,172 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index 51da5e6..a1482c8 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -3795,6 +3795,21 @@ bool TryDecodeTBL_ASIMDTBL_L1_1(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// raptormark: the table registers of TBL/TBX are consecutive MODULO 32 --
++// "the register number is incremented and wrapped within the range 0 to 31"
++// (ARM ARM, TBL). Without the wrap a table starting at V30 or V31 asks for
++// register 32, which is not a register.
++//
++// No site in the measured corpus wraps (the 706 TBL sites start at V16/V20/V24/
++// V28), so this is not a fix for anything observed -- it is the difference
++// between implementing the instruction and implementing the cases that happened
++// to turn up. `TryDecodeTBL_ASIMDTBL_L2_2` below is switched onto it too; it had
++// the same latent out-of-range operand for Rn=31.
++static aarch64::RegNum WrapVReg(aarch64::RegNum rn, unsigned add) {
++  using U = std::underlying_type<aarch64::RegNum>::type;
++  return static_cast<aarch64::RegNum>((static_cast<U>(rn) + add) % 32);
++}
++
+ // TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B }, <Vm>.<Ta>
+ bool TryDecodeTBL_ASIMDTBL_L2_2(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+@@ -3803,9 +3818,39 @@ bool TryDecodeTBL_ASIMDTBL_L2_2(const InstData &data, Instruction &inst) {
+   AddArrangementSpecifier(inst, ta_total_size, 8);
+   AddRegOperand(inst, kActionWrite, ta_rclass, kUseAsValue, data.Rd);
+   AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, data.Rn);
+-  aarch64::RegNum rn_plus_1 =
+-      static_cast<aarch64::RegNum>(std::underlying_type<aarch64::RegNum>::type(data.Rn) + 1);
+-  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, rn_plus_1);
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, WrapVReg(data.Rn, 1));
++  AddRegOperand(inst, kActionRead, ta_rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
++// TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B }, <Vm>.<Ta>
++bool TryDecodeTBL_ASIMDTBL_L3_3(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  auto ta_rclass = data.Q ? kReg16B : kReg8B;
++  auto ta_total_size = data.Q ? 128 : 64;
++  AddArrangementSpecifier(inst, ta_total_size, 8);
++  AddRegOperand(inst, kActionWrite, ta_rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, WrapVReg(data.Rn, 1));
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, WrapVReg(data.Rn, 2));
++  AddRegOperand(inst, kActionRead, ta_rclass, kUseAsValue, data.Rm);
++  return true;
++}
++
++// TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>
++//
++// This is the form that matters: an `[ecv-undecoded]` inventory of the postgres
++// closure (2026-08-19) found 706 TBL sites and ALL 706 are this one, 16B.
++bool TryDecodeTBL_ASIMDTBL_L4_4(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  auto ta_rclass = data.Q ? kReg16B : kReg8B;
++  auto ta_total_size = data.Q ? 128 : 64;
++  AddArrangementSpecifier(inst, ta_total_size, 8);
++  AddRegOperand(inst, kActionWrite, ta_rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, WrapVReg(data.Rn, 1));
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, WrapVReg(data.Rn, 2));
++  AddRegOperand(inst, kActionRead, kReg16B, kUseAsValue, WrapVReg(data.Rn, 3));
+   AddRegOperand(inst, kActionRead, ta_rclass, kUseAsValue, data.Rm);
+   return true;
+ }
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 2accc71..4f90076 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -14089,9 +14089,7 @@ bool TryDecodeFCVTZU_64D_FLOAT2FIX(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B }, <Vm>.<Ta>
+-bool TryDecodeTBL_ASIMDTBL_L3_3(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeTBL_ASIMDTBL_L3_3: implemented in Arch.cpp (3-/4-register table lookup).
+ 
+ // TBL TBL_asimdtbl_L4_4:
+ //   0 x Rd       0
+@@ -14127,9 +14125,7 @@ bool TryDecodeTBL_ASIMDTBL_L3_3(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B, <Vn+2>.16B, <Vn+3>.16B }, <Vm>.<Ta>
+-bool TryDecodeTBL_ASIMDTBL_L4_4(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeTBL_ASIMDTBL_L4_4: implemented in Arch.cpp (3-/4-register table lookup).
+ 
+ // FMAXNMP FMAXNMP_asisdpair_only_H:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index f5bd94c..78f11b3 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -3041,6 +3041,72 @@ DEF_ISEL(TBL_ASIMDTBL_L2_2_8B) =
+ DEF_ISEL(TBL_ASIMDTBL_L2_2_16B) =
+     TBL_L2_2_16B<VIu8v16>;  // TBL  <Vd>.<Ta>, { <Vn>.16B, <Vn+1>.16B }, <Vm>.<Ta>
+ 
++// TBL, 3- and 4-register tables.
++//
++// raptormark: the L1/L2 forms above build the table in a `VIu8v32` vector
++// because one exists. There is no `VIu8v48`/`VIu8v64`, and adding them to
++// `Runtime/Types.h` would put two new vector widths into the ABI for the sake of
++// a scratch buffer that never crosses a function boundary. A local array is the
++// same lowering with none of that.
++//
++// The out-of-range rule is what makes TBL not a permute: an index >= the table
++// size yields ZERO (TBX, a different instruction, leaves the destination
++// element alone instead). The comparison is against the TABLE size -- 48 or 64
++// -- not against 16 or the element count, and getting that wrong produces
++// plausible output for every index that happens to be small.
++namespace {
++#define MAKE_TBL_LN(nregs, tbl_bytes, elem_num) \
++  template <typename S> \
++  DEF_SEM_T(TBL_L##nregs##_##nregs##_##elem_num##B, VIu8v16 srcn, VIu8v16 srcn_1, \
++            ECV_TBL_EXTRA_##nregs S srcm) { \
++    uint8_t vec_tbl[tbl_bytes] = {}; \
++    auto n0 = UReadVI8(srcn); \
++    auto n1 = UReadVI8(srcn_1); \
++    ECV_TBL_READ_##nregs \
++    auto idx_v = UReadVI8(srcm); \
++    _Pragma("unroll") for (size_t i = 0; i < 16; i++) { \
++      vec_tbl[i] = n0[i]; \
++      vec_tbl[i + 16] = n1[i]; \
++      ECV_TBL_FILL_##nregs \
++    } \
++    S res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < elem_num; i++) { \
++      res[i] = idx_v[i] < tbl_bytes ? vec_tbl[idx_v[i]] : 0; \
++    } \
++    return res; \
++  }
++
++#define ECV_TBL_EXTRA_3 VIu8v16 srcn_2,
++#define ECV_TBL_READ_3 auto n2 = UReadVI8(srcn_2);
++#define ECV_TBL_FILL_3 vec_tbl[i + 32] = n2[i];
++
++#define ECV_TBL_EXTRA_4 VIu8v16 srcn_2, VIu8v16 srcn_3,
++#define ECV_TBL_READ_4 \
++  auto n2 = UReadVI8(srcn_2); \
++  auto n3 = UReadVI8(srcn_3);
++#define ECV_TBL_FILL_4 \
++  vec_tbl[i + 32] = n2[i]; \
++  vec_tbl[i + 48] = n3[i];
++
++MAKE_TBL_LN(3, 48, 8)
++MAKE_TBL_LN(3, 48, 16)
++MAKE_TBL_LN(4, 64, 8)
++MAKE_TBL_LN(4, 64, 16)
++
++#undef ECV_TBL_FILL_4
++#undef ECV_TBL_READ_4
++#undef ECV_TBL_EXTRA_4
++#undef ECV_TBL_FILL_3
++#undef ECV_TBL_READ_3
++#undef ECV_TBL_EXTRA_3
++#undef MAKE_TBL_LN
++}  // namespace
++
++DEF_ISEL(TBL_ASIMDTBL_L3_3_8B) = TBL_L3_3_8B<VIu8v8>;
++DEF_ISEL(TBL_ASIMDTBL_L3_3_16B) = TBL_L3_3_16B<VIu8v16>;
++DEF_ISEL(TBL_ASIMDTBL_L4_4_8B) = TBL_L4_4_8B<VIu8v8>;
++DEF_ISEL(TBL_ASIMDTBL_L4_4_16B) = TBL_L4_4_16B<VIu8v16>;
++
+ // AES / PMULL / SHA1H
+ namespace {
+ 

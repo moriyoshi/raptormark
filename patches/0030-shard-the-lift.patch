@@ -1,0 +1,72 @@
+diff --git a/lifter/Lift.cpp b/lifter/Lift.cpp
+--- a/lifter/Lift.cpp
++++ b/lifter/Lift.cpp
+@@ -56,6 +56,10 @@
+     "Whether the test mode is on or off");  // We use `test_mode` for not only test mode but also `no VRP` mode.
+ DEFINE_string(fork_emulation, "",
+               "enable the function of emulating fork syscall on emscripten browser.");
++DEFINE_string(shard, "",
++              "Lift only a subset of the functions, as \"i/N\" (0-based). Every shard still "
++              "runs the full SetELFData, so all shards share one entry set and make identical "
++              "trace-extension decisions; only the LIFTING is divided. Unset means lift all.");
+ 
+ ArchName remill::EcvReg::target_elf_arch;
+ 
+@@ -129,12 +133,57 @@
+   std::unordered_map<uint64_t, const char *> addr_fun_name_map;
+   std::set<uint64_t> fin_addrs;
+ 
++  // Shard selection. Parsed once; shard_n == 1 lifts everything, which is the
++  // behaviour when --shard is absent.
++  uint64_t shard_i = 0, shard_n = 1;
++  if (!FLAGS_shard.empty()) {
++    auto slash = FLAGS_shard.find('/');
++    if (slash == std::string::npos) {
++      elfconv_runtime_error("[ERROR] --shard wants \"i/N\", got \"%s\".\n", FLAGS_shard.c_str());
++    }
++    shard_i = std::stoull(FLAGS_shard.substr(0, slash));
++    shard_n = std::stoull(FLAGS_shard.substr(slash + 1));
++    if (shard_n == 0 || shard_i >= shard_n) {
++      elfconv_runtime_error("[ERROR] --shard \"%s\" is out of range.\n", FLAGS_shard.c_str());
++    }
++  }
++
++  // Assignment is a pure function of the function's ADDRESS, never of iteration
++  // or discovery order, so a given function lands in the same shard in every run
++  // and in every process -- which is what lets shards be cached independently.
++  //
++  // It must be a MIXING hash, not the low address bits. Function entry points are
++  // heavily aligned: measured on these fixtures, 84.6% of bash-glibc's 6,578
++  // functions and 87.8% of aptget-glibc's 18,946 start on a 16-byte boundary. An
++  // `(addr >> 2) % N` rule is then just address bits [3:2] and degenerates -- it
++  // put 26.5 MB of a 27.6 MB module into one of four shards. This is the
++  // splitmix64 finalizer, which decorrelates those bits.
++  auto shard_of = [](uint64_t addr) {
++    uint64_t x = addr;
++    x ^= x >> 33;
++    x *= 0xff51afd7ed558ccdULL;
++    x ^= x >> 33;
++    x *= 0xc4ceb9fe1a85ec53ULL;
++    x ^= x >> 33;
++    return x;
++  };
++  auto in_shard = [&](uint64_t addr) {
++    return shard_n == 1 || shard_of(addr) % shard_n == shard_i;
++  };
++
+   do {
+     manager.rest_disasm_funcs.clear();
+     for (const auto &[addr, dasm_func] : manager.disasm_funcs) {
+       if (fin_addrs.contains(addr)) {
+         continue;
+       }
++      // Not ours: skip LIFTING it, but leave it in disasm_funcs. isFunctionEntry
++      // still answers yes for it, so a `b` to it is still recognised as a tail
++      // call rather than being trace-extended into (patches/0022), and
++      // get_trace_decl emits a plain declaration that resolves at link time.
++      if (!in_shard(addr)) {
++        continue;
++      }
+       addr_fun_name_map[addr] = dasm_func.func_name.c_str();
+       auto &lifted_fun_name = addr_fun_name_map[addr];
+       if (!main_lifter.Lift(dasm_func.vma, lifted_fun_name)) {

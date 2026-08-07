@@ -1,0 +1,221 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index a8ffb93..bd34028 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -3468,6 +3468,41 @@ bool TryDecodeFRINTM_ASIMDMISC_R(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// FRINT{N,A,P,Z,I,X}  <Vd>.<T>, <Vn>.<T> -- round a float vector to an integral
++// value, staying in the float domain.
++//
++// FRINTM (above) was the only one of the seven upstream implements, so a guest
++// that rounds any way other than downward met `_ecv_unreached`. Operands are
++// identical to FRINTM's in every case; only the rounding differs, and that
++// lives in the semantics.
++static bool TryDecodeFRINT_ASIMDMISC(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINTM_ASIMDMISC_R(data, inst);
++}
++
++bool TryDecodeFRINTN_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFRINTA_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFRINTP_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFRINTZ_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFRINTI_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINT_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFRINTX_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFRINT_ASIMDMISC(data, inst);
++}
++
+ // TBL  <Vd>.<Ta>, { <Vn>.16B }, <Vm>.<Ta>
+ bool TryDecodeTBL_ASIMDTBL_L1_1(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index e69f392..cfc1de7 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -2988,9 +2988,7 @@ bool TryDecodeFRINTA_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FRINTA  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFRINTA_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTA_ASIMDMISC_R: implemented in Arch.cpp (vector round to integral).
+ 
+ // STXP STXP_SP32_ldstexcl:
+ //   0 x Rt       0
+@@ -6662,9 +6660,7 @@ bool TryDecodeFRINTZ_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FRINTZ  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFRINTZ_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTZ_ASIMDMISC_R: implemented in Arch.cpp (vector round to integral).
+ 
+ // STXRH STXRH_SR32_ldstexcl:
+ //   0 x Rt       0
+@@ -9061,9 +9057,7 @@ bool TryDecodeFRINTX_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FRINTX  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFRINTX_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTX_ASIMDMISC_R: implemented in Arch.cpp (vector round to integral).
+ 
+ // HLT HLT_EX_exception:
+ //   0 0 LL       0
+@@ -22396,9 +22390,7 @@ bool TryDecodeFRINTP_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FRINTP  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFRINTP_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTP_ASIMDMISC_R: implemented in Arch.cpp (vector round to integral).
+ 
+ // LDLARB LDLARB_LR32_ldstexcl:
+ //   0 x Rt       0
+@@ -29546,9 +29538,7 @@ bool TryDecodeFRINTI_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FRINTI  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFRINTI_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTI_ASIMDMISC_R: implemented in Arch.cpp (vector round to integral).
+ 
+ 
+ // LDSMINAB LDSMINAB_32_memop:
+@@ -37795,9 +37785,7 @@ bool TryDecodeFRINTN_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FRINTN  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFRINTN_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFRINTN_ASIMDMISC_R: implemented in Arch.cpp (vector round to integral).
+ 
+ // STR STR_B_ldst_regoff:
+ //   0 x Rt       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+index 925c016..2d77e6d 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/CONVERT.cpp
+@@ -401,6 +401,100 @@ DEF_ISEL(FRINTM_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTM_Vector32<VIf32v2>;
+ DEF_ISEL(FRINTM_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTM_Vector32<VIf32v4>;
+ DEF_ISEL(FRINTM_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTM_Vector64<VIf64v2>;
+ 
++// FRINT{N,A,P,Z,I,X}  <Vd>.<T>, <Vn>.<T> -- the six vector rounding modes
++// upstream left as decode stubs, written from FRINTM_Vector above.
++//
++// The helper per mode is the one patches 0004/0011 settled on for the scalar
++// forms, so scalar and vector cannot disagree: wasm rounds to nearest-even
++// natively, which makes `std::nearbyint` under the default FE_TONEAREST the
++// right implementation of N, and `std::round` the right one of A.
++namespace {
++
++#define MAKE_FRINT_VECTOR(name, round) \
++  template <typename S> \
++  DEF_SEM_T_STATE(name##_Vector32, S src) { \
++    auto srcv = FReadVI32(src); \
++    S res = {}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcv); i++) { \
++      res[i] = round(srcv[i]); \
++    } \
++    return res; \
++  } \
++  template <typename S> \
++  DEF_SEM_T_STATE(name##_Vector64, S src) { \
++    auto srcv = FReadVI64(src); \
++    S res = {}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(srcv); i++) { \
++      res[i] = round(srcv[i]); \
++    } \
++    return res; \
++  }
++
++// FRINTN: round to nearest, ties to EVEN -- what nearbyint does under the default FE_TONEAREST.
++MAKE_FRINT_VECTOR(FRINTN, std::nearbyint)
++// FRINTA: round to nearest, ties AWAY from zero.
++MAKE_FRINT_VECTOR(FRINTA, std::round)
++// FRINTP: round toward +infinity.
++MAKE_FRINT_VECTOR(FRINTP, std::ceil)
++// FRINTZ: round toward zero.
++MAKE_FRINT_VECTOR(FRINTZ, std::trunc)
++// FRINTI: round using the FPCR mode; ecvisor never changes it from RN, so this is FRINTN.
++MAKE_FRINT_VECTOR(FRINTI, std::nearbyint)
++// FRINTX: as FRINTI, but signals Inexact -- same VALUE, and the flag is not modelled.
++MAKE_FRINT_VECTOR(FRINTX, std::nearbyint)
++
++#undef MAKE_FRINT_VECTOR
++
++}  // namespace
++
++DEF_ISEL(FRINTN_ASIMDMISC_R_2S) = FRINTN_Vector32<VIf32v2>;
++DEF_ISEL(FRINTN_ASIMDMISC_R_4S) = FRINTN_Vector32<VIf32v4>;
++DEF_ISEL(FRINTN_ASIMDMISC_R_2D) = FRINTN_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTN_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTN_Vector32<VIf32v2>;
++DEF_ISEL(FRINTN_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTN_Vector32<VIf32v4>;
++DEF_ISEL(FRINTN_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTN_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTA_ASIMDMISC_R_2S) = FRINTA_Vector32<VIf32v2>;
++DEF_ISEL(FRINTA_ASIMDMISC_R_4S) = FRINTA_Vector32<VIf32v4>;
++DEF_ISEL(FRINTA_ASIMDMISC_R_2D) = FRINTA_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTA_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTA_Vector32<VIf32v2>;
++DEF_ISEL(FRINTA_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTA_Vector32<VIf32v4>;
++DEF_ISEL(FRINTA_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTA_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTP_ASIMDMISC_R_2S) = FRINTP_Vector32<VIf32v2>;
++DEF_ISEL(FRINTP_ASIMDMISC_R_4S) = FRINTP_Vector32<VIf32v4>;
++DEF_ISEL(FRINTP_ASIMDMISC_R_2D) = FRINTP_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTP_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTP_Vector32<VIf32v2>;
++DEF_ISEL(FRINTP_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTP_Vector32<VIf32v4>;
++DEF_ISEL(FRINTP_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTP_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTZ_ASIMDMISC_R_2S) = FRINTZ_Vector32<VIf32v2>;
++DEF_ISEL(FRINTZ_ASIMDMISC_R_4S) = FRINTZ_Vector32<VIf32v4>;
++DEF_ISEL(FRINTZ_ASIMDMISC_R_2D) = FRINTZ_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTZ_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTZ_Vector32<VIf32v2>;
++DEF_ISEL(FRINTZ_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTZ_Vector32<VIf32v4>;
++DEF_ISEL(FRINTZ_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTZ_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTI_ASIMDMISC_R_2S) = FRINTI_Vector32<VIf32v2>;
++DEF_ISEL(FRINTI_ASIMDMISC_R_4S) = FRINTI_Vector32<VIf32v4>;
++DEF_ISEL(FRINTI_ASIMDMISC_R_2D) = FRINTI_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTI_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTI_Vector32<VIf32v2>;
++DEF_ISEL(FRINTI_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTI_Vector32<VIf32v4>;
++DEF_ISEL(FRINTI_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTI_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTX_ASIMDMISC_R_2S) = FRINTX_Vector32<VIf32v2>;
++DEF_ISEL(FRINTX_ASIMDMISC_R_4S) = FRINTX_Vector32<VIf32v4>;
++DEF_ISEL(FRINTX_ASIMDMISC_R_2D) = FRINTX_Vector64<VIf64v2>;
++
++DEF_ISEL(FRINTX_ASIMDMISC_R_2S_FPSRSTATUS) = FRINTX_Vector32<VIf32v2>;
++DEF_ISEL(FRINTX_ASIMDMISC_R_4S_FPSRSTATUS) = FRINTX_Vector32<VIf32v4>;
++DEF_ISEL(FRINTX_ASIMDMISC_R_2D_FPSRSTATUS) = FRINTX_Vector64<VIf64v2>;
++
+ namespace {
+ 
+ // SCVTF  <Sd>, <Wn>

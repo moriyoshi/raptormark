@@ -1,0 +1,36 @@
+diff --git a/backend/remill/include/remill/Arch/Runtime/Operators.h b/backend/remill/include/remill/Arch/Runtime/Operators.h
+index a86cac5..30cf56b 100644
+--- a/backend/remill/include/remill/Arch/Runtime/Operators.h
++++ b/backend/remill/include/remill/Arch/Runtime/Operators.h
+@@ -38,7 +38,19 @@ class RuntimeManager;
+ #  define read_memory16(rt_m, arena_ptr, addr) *(uint16_t *) (arena_ptr + addr)
+ #  define read_memory32(rt_m, arena_ptr, addr) *(uint32_t *) (arena_ptr + addr)
+ #  define read_memory64(rt_m, arena_ptr, addr) *(uint64_t *) (arena_ptr + addr)
+-#  define read_memory128(rt_m, arena_ptr, addr) *(uint128_t *) (arena_ptr + addr)
++// raptormark: the guest arena is a flat byte buffer, so a 128-bit access can land
++// on any 4/8-byte alignment (e.g. glibc __memmove_generic's overlapping ItemId
++// shift stores a Q reg to a 4-byte-aligned address). `*(uint128_t *)` tells clang
++// the pointer is 16-byte aligned; its wasm codegen for the UNALIGNED case is wrong
++// (a 32-bit lane gets duplicated), silently corrupting the copy. memcpy is
++// alignment-agnostic and codegens correctly. (uint64_t and smaller are fine
++// unaligned on wasm, so only the 128-bit accessors need this.)
++#  define read_memory128(rt_m, arena_ptr, addr) \
++    ({ \
++      uint128_t _ecv_v128; \
++      __builtin_memcpy(&_ecv_v128, (arena_ptr) + (addr), sizeof(uint128_t)); \
++      _ecv_v128; \
++    })
+ #  define read_memoryf32(rt_m, arena_ptr, addr) *(float32_t *) (arena_ptr + addr)
+ #  define read_memoryf64(rt_m, arena_ptr, addr) *(float64_t *) (arena_ptr + addr)
+ #endif
+@@ -80,8 +92,8 @@ class RuntimeManager;
+ 
+ #  define write_memory128(rt_m, arena_ptr, addr, src) \
+     do { \
+-      auto dst = (uint128_t *) (arena_ptr + addr); \
+-      *dst = src; \
++      uint128_t _ecv_s128 = (src); /* raptormark: alignment-safe, see read_memory128 */ \
++      __builtin_memcpy((arena_ptr) + (addr), &_ecv_s128, sizeof(uint128_t)); \
+     } while (0);
+ 
+ #  define write_memoryf32(rt_m, arena_ptr, addr, src) \

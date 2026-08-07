@@ -1,0 +1,190 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -3027,6 +3027,52 @@
+   return TryDecodeRdW_Rn_Rm(data, inst, kRegW);
+ }
+ 
++// CRC32{B,H,W}  <Wd>, <Wn>, <Wm>   and   CRC32X  <Wd>, <Wn>, <Xm>
++// CRC32C{B,H,W} <Wd>, <Wn>, <Wm>   and   CRC32CX <Wd>, <Wn>, <Xm>
++//
++// Not TryDecodeRdW_Rn_Rm: the accumulator and the destination are always W
++// while the VALUE operand is X for the 64-bit forms, so the two sources do not
++// share a register class.
++static bool TryDecodeCRC32(const InstData &data, Instruction &inst, RegClass val_class) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddRegOperand(inst, kActionWrite, kRegW, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kRegW, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, val_class, kUseAsValue, data.Rm);
++  return true;
++}
++
++bool TryDecodeCRC32B_32C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegW);
++}
++
++bool TryDecodeCRC32H_32C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegW);
++}
++
++bool TryDecodeCRC32W_32C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegW);
++}
++
++bool TryDecodeCRC32X_64C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegX);
++}
++
++bool TryDecodeCRC32CB_32C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegW);
++}
++
++bool TryDecodeCRC32CH_32C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegW);
++}
++
++bool TryDecodeCRC32CW_32C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegW);
++}
++
++bool TryDecodeCRC32CX_64C_DP_2SRC(const InstData &data, Instruction &inst) {
++  return TryDecodeCRC32(data, inst, kRegX);
++}
++
+ // UDIV  <Xd>, <Xn>, <Xm>
+ bool TryDecodeUDIV_64_DP_2SRC(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -12737,9 +12737,7 @@
+ //  30 0 op       0
+ //  31 0 sf       0
+ // CRC32CB  <Wd>, <Wn>, <Wm>
+-bool TryDecodeCRC32CB_32C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32CB_32C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // CRC32CH CRC32CH_32C_dp_2src:
+ //   0 x Rd       0
+@@ -12775,9 +12773,7 @@
+ //  30 0 op       0
+ //  31 0 sf       0
+ // CRC32CH  <Wd>, <Wn>, <Wm>
+-bool TryDecodeCRC32CH_32C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32CH_32C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // CRC32CW CRC32CW_32C_dp_2src:
+ //   0 x Rd       0
+@@ -12813,9 +12809,7 @@
+ //  30 0 op       0
+ //  31 0 sf       0
+ // CRC32CW  <Wd>, <Wn>, <Wm>
+-bool TryDecodeCRC32CW_32C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32CW_32C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // CRC32CX CRC32CX_64C_dp_2src:
+ //   0 x Rd       0
+@@ -12851,9 +12845,7 @@
+ //  30 0 op       0
+ //  31 1 sf       0
+ // CRC32CX  <Wd>, <Wn>, <Xm>
+-bool TryDecodeCRC32CX_64C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32CX_64C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // UADDLP UADDLP_asimdmisc_P:
+ //   0 x Rd       0
+@@ -30193,9 +30185,7 @@
+ //  30 0 op       0
+ //  31 0 sf       0
+ // CRC32B  <Wd>, <Wn>, <Wm>
+-bool TryDecodeCRC32B_32C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32B_32C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // CRC32H CRC32H_32C_dp_2src:
+ //   0 x Rd       0
+@@ -30231,9 +30221,7 @@
+ //  30 0 op       0
+ //  31 0 sf       0
+ // CRC32H  <Wd>, <Wn>, <Wm>
+-bool TryDecodeCRC32H_32C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32H_32C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // CRC32W CRC32W_32C_dp_2src:
+ //   0 x Rd       0
+@@ -30269,9 +30257,7 @@
+ //  30 0 op       0
+ //  31 0 sf       0
+ // CRC32W  <Wd>, <Wn>, <Wm>
+-bool TryDecodeCRC32W_32C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32W_32C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // CRC32X CRC32X_64C_dp_2src:
+ //   0 x Rd       0
+@@ -30307,9 +30293,7 @@
+ //  30 0 op       0
+ //  31 1 sf       0
+ // CRC32X  <Wd>, <Wn>, <Xm>
+-bool TryDecodeCRC32X_64C_DP_2SRC(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeCRC32X_64C_DP_2SRC: implemented in Arch.cpp (ARMv8 CRC32 extension).
+ 
+ // URSHR URSHR_asisdshf_R:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp b/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
+--- a/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/BINARY.cpp
+@@ -228,6 +228,39 @@
+ DEF_ISEL(SMULH_64_DP_3SRC) = SMULH;
+ 
+ DEF_ISEL(UDIV_32_DP_2SRC) = UDIV<R32>;  // UDIV  <Wd>, <Wn>, <Wm>
++
++// CRC32 / CRC32C (ARMv8 CRC32 extension).
++//
++// Both are the ordinary REFLECTED (LSB-first) CRC update, which is why the
++// constants below are bit-reversed polynomials: 0xEDB88320 reverses CRC-32's
++// 0x04C11DB7, and 0x82F63B78 reverses Castagnoli's 0x1EDC6F41. ARM's pseudocode
++// says the same thing with BitReverse/Poly32Mod2 around a big-endian division;
++// the reflected loop is the standard equivalent, and is exactly what the
++// software implementations these instructions replace already compute.
++//
++// The value operand is consumed low byte first, kBytes of it: 1/2/4 for the
++// B/H/W forms out of a W register, 8 for the X form out of an X register.
++template <typename ST, uint32_t kPoly, unsigned kBytes>
++DEF_SEM_T(CRC32, R32 acc, ST val) {
++  uint32_t crc = Read(acc);
++  uint64_t data = static_cast<uint64_t>(Read(val));
++  for (unsigned i = 0; i < kBytes; ++i) {
++    crc ^= static_cast<uint32_t>((data >> (8u * i)) & 0xffu);
++    for (unsigned b = 0; b < 8u; ++b) {
++      crc = (crc >> 1u) ^ (kPoly & (0u - (crc & 1u)));
++    }
++  }
++  return crc;
++}
++
++DEF_ISEL(CRC32B_32C_DP_2SRC) = CRC32<R32, 0xEDB88320u, 1>;  // CRC32B  <Wd>, <Wn>, <Wm>
++DEF_ISEL(CRC32H_32C_DP_2SRC) = CRC32<R32, 0xEDB88320u, 2>;  // CRC32H  <Wd>, <Wn>, <Wm>
++DEF_ISEL(CRC32W_32C_DP_2SRC) = CRC32<R32, 0xEDB88320u, 4>;  // CRC32W  <Wd>, <Wn>, <Wm>
++DEF_ISEL(CRC32X_64C_DP_2SRC) = CRC32<R64, 0xEDB88320u, 8>;  // CRC32X  <Wd>, <Wn>, <Xm>
++DEF_ISEL(CRC32CB_32C_DP_2SRC) = CRC32<R32, 0x82F63B78u, 1>;  // CRC32CB  <Wd>, <Wn>, <Wm>
++DEF_ISEL(CRC32CH_32C_DP_2SRC) = CRC32<R32, 0x82F63B78u, 2>;  // CRC32CH  <Wd>, <Wn>, <Wm>
++DEF_ISEL(CRC32CW_32C_DP_2SRC) = CRC32<R32, 0x82F63B78u, 4>;  // CRC32CW  <Wd>, <Wn>, <Wm>
++DEF_ISEL(CRC32CX_64C_DP_2SRC) = CRC32<R64, 0x82F63B78u, 8>;  // CRC32CX  <Wd>, <Wn>, <Xm>
+ DEF_ISEL(UDIV_64_DP_2SRC) = UDIV<R64>;  // UDIV  <Xd>, <Xn>, <Xm>
+ 
+ DEF_ISEL(SDIV_32_DP_2SRC) = SDIV<R32>;  // SDIV  <Wd>, <Wn>, <Wm>

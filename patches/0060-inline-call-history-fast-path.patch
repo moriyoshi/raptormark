@@ -1,0 +1,384 @@
+diff --git a/backend/remill/include/remill/BC/InstructionLifter.h b/backend/remill/include/remill/BC/InstructionLifter.h
+index da0cfca..ce1e61f 100644
+--- a/backend/remill/include/remill/BC/InstructionLifter.h
++++ b/backend/remill/include/remill/BC/InstructionLifter.h
+@@ -68,16 +68,24 @@ class LiftConfig {
+   bool fork_emulation;
+   uint64_t dbg_fun_vma;
+   bool has_symtab;  // Whether the binary has symbol table
++  // Emit the call history inline instead of calling `_ecv_save_call_history` /
++  // `_ecv_func_epilogue` (patch 0060). OPT-IN, and DEFAULT OFF: with it off the
++  // lifter emits exactly the calls it did before that patch, byte for byte, so
++  // the patch is inert unless asked for. Measured when on: -18.7% on a
++  // call-heavy guest, -2.3% on a realistic one, +10% module size.
++  bool inline_call_history;
+ 
+   LiftConfig() = delete;
+ 
+   LiftConfig(bool __float_exception_enabled, bool __norm_mode, ArchName __target_elf_arch,
+-             bool __fork_emulation, bool __has_symtab = false)
++             bool __fork_emulation, bool __has_symtab = false,
++             bool __inline_call_history = false)
+       : float_exception_enabled(__float_exception_enabled),
+         norm_mode(__norm_mode),
+         target_elf_arch(__target_elf_arch),
+         fork_emulation(__fork_emulation),
+-        has_symtab(__has_symtab) {}
++        has_symtab(__has_symtab),
++        inline_call_history(__inline_call_history) {}
+ };
+ 
+ // Instruction independent lifting
+diff --git a/backend/remill/include/remill/BC/TraceLifter.h b/backend/remill/include/remill/BC/TraceLifter.h
+index fa30b0c..8d793b2 100644
+--- a/backend/remill/include/remill/BC/TraceLifter.h
++++ b/backend/remill/include/remill/BC/TraceLifter.h
+@@ -436,6 +436,23 @@ class TraceLifter::Impl {
+   // in place of calling `_ecv_suspended`. Declared into the module on first use.
+   llvm::GlobalVariable *GetOrCreateUnwindingGlobal();
+ 
++  // Any i32 wasm global (address space 1) ecvisor's C shim defines. Declared
++  // into the module on first use.
++  llvm::GlobalVariable *GetOrCreateEcvI32Global(const char *name);
++
++  // Declares an ecvisor runtime entry point that is not in remill's intrinsic
++  // table (the inline-capable call-history variants).
++  llvm::Function *EcvRuntimeFn(const char *name, llvm::ArrayRef<llvm::Type *> params);
++
++  // Inline call-history maintenance, replacing the `_ecv_save_call_history` and
++  // `_ecv_func_epilogue` calls at each guest BL. Each emits a slow/fast diamond
++  // and returns the JOIN block to keep lifting into; the slow arm is the
++  // original call, so every diagnostic still works and the old path stays
++  // reachable for differential testing.
++  llvm::BasicBlock *EmitCallHistoryPush(llvm::BasicBlock *block, uint64_t func_addr,
++                                        uint64_t ret_addr);
++  llvm::BasicBlock *EmitCallHistoryPop(llvm::BasicBlock *block);
++
+   void Optimize();
+ 
+   const Arch *const arch;
+diff --git a/backend/remill/lib/BC/ForkEmulation.cpp b/backend/remill/lib/BC/ForkEmulation.cpp
+index f520df7..aa86cd9 100644
+--- a/backend/remill/lib/BC/ForkEmulation.cpp
++++ b/backend/remill/lib/BC/ForkEmulation.cpp
+@@ -208,6 +208,154 @@ llvm::GlobalVariable *TraceLifter::Impl::GetOrCreateUnwindingGlobal() {
+                                   llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/1);
+ }
+ 
++// Declares one of ecvisor's inline-capable call-history entry points on first
++// use. They are not in remill's intrinsic table -- they exist only for modules
++// built with `--inline-call-history`, and only the slow arm calls them.
++llvm::Function *TraceLifter::Impl::EcvRuntimeFn(const char *name,
++                                                llvm::ArrayRef<llvm::Type *> params) {
++  if (auto *f = module->getFunction(name)) {
++    return f;
++  }
++  auto *ty = llvm::FunctionType::get(llvm::Type::getVoidTy(context), params, false);
++  return llvm::Function::Create(ty, llvm::GlobalValue::ExternalLinkage, name, module);
++}
++
++// Any i32 wasm global ecvisor's C shim defines (runtime/cshim/ecv_globals.c).
++llvm::GlobalVariable *TraceLifter::Impl::GetOrCreateEcvI32Global(const char *name) {
++  if (auto *g = module->getNamedGlobal(name)) {
++    return g;
++  }
++  return new llvm::GlobalVariable(*module, llvm::Type::getInt32Ty(context),
++                                  /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
++                                  /*Initializer=*/nullptr, name, /*InsertBefore=*/nullptr,
++                                  llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/1);
++}
++
++// Byte offset of `State.gpr.x[30].val` -- the guest link register.
++//
++// BAKED CONSTANT, and the reason it is safe to bake: `runtime/src/abi.rs` pins
++// the whole `State` layout with `const` assertions and carries one for THIS
++// offset naming this patch, so a layout change fails the ecvisor build with a
++// pointer back here rather than silently storing into the wrong register.
++//
++// offsetof(State, gpr) = 536; x[30] is the 31st 16-byte PaddedReg = 536 + 480;
++// `.val` is the second u64 of that pair = +8.
++static constexpr uint64_t kStateX30ValOffset = 536 + 30 * 16 + 8;
++
++// Inline the call-history push that `_ecv_save_call_history` used to do.
++//
++// WHY. It runs once per guest BL -- 32,972 call sites in a linked bash module --
++// and its hot-path body is a 16-byte store, a length bump and the x30 write.
++// Measured: removing both call-history hooks entirely is worth -31% on a
++// call-heavy guest and -4.7% on a realistic one, and trimming the Rust bodies
++// alone reached only -2.3% of that, so the remainder is the CALLS themselves.
++//
++// The fast arm is taken only when no per-call diagnostic is armed AND there is
++// room in the buffer; otherwise the original call runs and does exactly what it
++// always did, including growing the buffer. So this is a pure fast path: every
++// behaviour still has one owner, and a published capacity of zero restores the
++// old code path at run time for a differential.
++llvm::BasicBlock *TraceLifter::Impl::EmitCallHistoryPush(llvm::BasicBlock *block,
++                                                         uint64_t func_addr, uint64_t ret_addr) {
++  auto i32 = llvm::Type::getInt32Ty(context);
++  auto i64 = llvm::Type::getInt64Ty(context);
++  auto ptr = llvm::PointerType::get(i64, 0);
++
++  auto slow_bb = llvm::BasicBlock::Create(context, "L_ch_slow", func);
++  auto fast_bb = llvm::BasicBlock::Create(context, "L_ch_fast", func);
++  auto join_bb = llvm::BasicBlock::Create(context, "L_ch_join", func);
++  for (auto *bb : {slow_bb, fast_bb, join_bb}) {
++    virtual_regs_opt->bb_reg_info_node_map.insert(
++        {bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++  }
++
++  llvm::IRBuilder<> ir(block);
++  // ONE condition, not two. `__ecv_slow` used to be read here as well, to send
++  // diagnostics-armed runs down the slow arm -- but the runtime can express
++  // that by publishing a capacity of ZERO, and `len >= cap` already covers it.
++  // Folding the two saved a global read and a branch at every one of these
++  // sites (4,111 in a small guest), which is not a rounding error on an
++  // interpreter where cost tracks instruction count roughly 1:1.
++  auto len = ir.CreateLoad(i32, GetOrCreateEcvI32Global("__ecv_ch_len"), true);
++  auto cap = ir.CreateLoad(i32, GetOrCreateEcvI32Global("__ecv_ch_cap"), true);
++  auto need_slow = ir.CreateICmpSGE(len, cap);
++  ConditionalBranchWithSaveParents(slow_bb, fast_bb, need_slow, block);
++
++  {
++    llvm::IRBuilder<> sir(slow_bb);
++    sir.CreateCall(EcvRuntimeFn("_ecv_save_call_history_ic",
++                                {state_ptr->getType(), runtime_ptr->getType(), i64, i64}),
++                   {state_ptr, runtime_ptr, llvm::ConstantInt::get(i64, func_addr),
++                    llvm::ConstantInt::get(i64, ret_addr)});
++    DirectBranchWithSaveParents(join_bb, slow_bb);
++  }
++  {
++    llvm::IRBuilder<> fir(fast_bb);
++    auto base = fir.CreateLoad(i32, GetOrCreateEcvI32Global("__ecv_ch_base"), true);
++    // frame = base + len*16; {fun at +0, ret at +8} -- context.rs `Frame`.
++    auto off = fir.CreateAdd(base, fir.CreateMul(len, llvm::ConstantInt::get(i32, 16)));
++    fir.CreateStore(llvm::ConstantInt::get(i64, func_addr), fir.CreateIntToPtr(off, ptr));
++    fir.CreateStore(
++        llvm::ConstantInt::get(i64, ret_addr),
++        fir.CreateIntToPtr(fir.CreateAdd(off, llvm::ConstantInt::get(i32, 8)), ptr));
++    fir.CreateStore(fir.CreateAdd(len, llvm::ConstantInt::get(i32, 1)),
++                    GetOrCreateEcvI32Global("__ecv_ch_len"), true);
++    // x30 = ret_addr. SEMANTIC, not bookkeeping: fork_emulation's bl/blr
++    // lowering skips the CALL semantic that writes the link register, and code
++    // that reads x30 directly -- glibc's setjmp, PAC LR signing -- gets garbage
++    // without this. It is what fixed PostgreSQL's PG_TRY/PG_CATCH.
++    auto x30 = fir.CreateIntToPtr(
++        fir.CreateAdd(fir.CreatePtrToInt(state_ptr, i32),
++                      llvm::ConstantInt::get(i32, kStateX30ValOffset)),
++        ptr);
++    fir.CreateStore(llvm::ConstantInt::get(i64, ret_addr), x30);
++    DirectBranchWithSaveParents(join_bb, fast_bb);
++  }
++  return join_bb;
++}
++
++// The matching pop. Same diamond; the fast arm is one decrement.
++//
++// The `len == 0` guard sends an empty history to the slow arm, where Rust's
++// `pop()` returns None instead of underflowing. An inline decrement of zero
++// would wrap to 4294967295 and the next push would store 64 GiB past the buffer.
++llvm::BasicBlock *TraceLifter::Impl::EmitCallHistoryPop(llvm::BasicBlock *block) {
++  auto i32 = llvm::Type::getInt32Ty(context);
++
++  auto slow_bb = llvm::BasicBlock::Create(context, "L_chp_slow", func);
++  auto fast_bb = llvm::BasicBlock::Create(context, "L_chp_fast", func);
++  auto join_bb = llvm::BasicBlock::Create(context, "L_chp_join", func);
++  for (auto *bb : {slow_bb, fast_bb, join_bb}) {
++    virtual_regs_opt->bb_reg_info_node_map.insert(
++        {bb, new BBRegInfoNode(func, state_ptr, runtime_ptr)});
++  }
++
++  llvm::IRBuilder<> ir(block);
++  // `len == 0` alone, for the same reason as the push. The runtime keeps the
++  // published length at zero whenever the fast path must not run, so an empty
++  // history and a disabled fast path are the same test -- and it is the test
++  // that already had to be here, since an inline decrement of zero would wrap
++  // to 4294967295.
++  auto len = ir.CreateLoad(i32, GetOrCreateEcvI32Global("__ecv_ch_len"), true);
++  auto need_slow = ir.CreateICmpEQ(len, llvm::ConstantInt::get(i32, 0));
++  ConditionalBranchWithSaveParents(slow_bb, fast_bb, need_slow, block);
++
++  {
++    llvm::IRBuilder<> sir(slow_bb);
++    sir.CreateCall(EcvRuntimeFn("_ecv_func_epilogue_ic",
++                                {state_ptr->getType(), runtime_ptr->getType()}),
++                   {state_ptr, runtime_ptr});
++    DirectBranchWithSaveParents(join_bb, slow_bb);
++  }
++  {
++    llvm::IRBuilder<> fir(fast_bb);
++    fir.CreateStore(fir.CreateSub(len, llvm::ConstantInt::get(i32, 1)),
++                    GetOrCreateEcvI32Global("__ecv_ch_len"), true);
++    DirectBranchWithSaveParents(join_bb, fast_bb);
++  }
++  return join_bb;
++}
++
+ // Emit the suspend check that gets a blocked process back to the scheduler.
+ //
+ // The cooperative scheduler suspends a process inside a blocking syscall (or on
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+index 61f7191..225ae9c 100644
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -769,12 +769,18 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+ 
+           if (inst.lift_config.fork_emulation) {
+             // call `_ecv_save_call_history`
+-            llvm::Value *cur_func_addr =
+-                llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trace_addr);
+-            llvm::Value *t_ret_addr =
+-                llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), inst.next_pc);
+-            ir.CreateCall(module->getFunction("_ecv_save_call_history"),
+-                          {state_ptr, runtime_ptr, cur_func_addr, t_ret_addr});
++            if (inst.lift_config.inline_call_history) {
++              // Inline fast path; its slow arm is this same call (patch 0060).
++              block = EmitCallHistoryPush(block, trace_addr, inst.next_pc);
++              ir.SetInsertPoint(block);
++            } else {
++              llvm::Value *cur_func_addr =
++                  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trace_addr);
++              llvm::Value *t_ret_addr =
++                  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), inst.next_pc);
++              ir.CreateCall(module->getFunction("_ecv_save_call_history"),
++                            {state_ptr, runtime_ptr, cur_func_addr, t_ret_addr});
++            }
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
+           }
+ 
+@@ -787,9 +793,15 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+             // The callee may have suspended somewhere below us. Return BEFORE
+             // the epilogue, so this frame stays on the call history for replay.
+             block = AddSuspendCheck(block);
+-            llvm::IRBuilder<> cont_ir(block);
+-            // call `_ecv_func_epilogue`
+-            cont_ir.CreateCall(module->getFunction("_ecv_func_epilogue"), {state_ptr, runtime_ptr});
++            if (inst.lift_config.inline_call_history) {
++              // Inline fast path; its slow arm is this same call (patch 0060).
++              block = EmitCallHistoryPop(block);
++              ir.SetInsertPoint(block);
++            } else {
++              llvm::IRBuilder<> cont_ir(block);
++              cont_ir.CreateCall(module->getFunction("_ecv_func_epilogue"),
++                                 {state_ptr, runtime_ptr});
++            }
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
+           }
+ 
+@@ -872,12 +884,18 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+ 
+           if (inst.lift_config.fork_emulation) {
+             // call `_ecv_save_call_history`
+-            llvm::Value *cur_func_addr =
+-                llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trace_addr);
+-            llvm::Value *t_ret_addr =
+-                llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), inst.next_pc);
+-            ir.CreateCall(module->getFunction("_ecv_save_call_history"),
+-                          {state_ptr, runtime_ptr, cur_func_addr, t_ret_addr});
++            if (inst.lift_config.inline_call_history) {
++              // Inline fast path; its slow arm is this same call (patch 0060).
++              block = EmitCallHistoryPush(block, trace_addr, inst.next_pc);
++              ir.SetInsertPoint(block);
++            } else {
++              llvm::Value *cur_func_addr =
++                  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), trace_addr);
++              llvm::Value *t_ret_addr =
++                  llvm::ConstantInt::get(llvm::Type::getInt64Ty(context), inst.next_pc);
++              ir.CreateCall(module->getFunction("_ecv_save_call_history"),
++                            {state_ptr, runtime_ptr, cur_func_addr, t_ret_addr});
++            }
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
+           }
+ 
+@@ -892,9 +910,15 @@ bool TraceLifter::Impl::Lift(uint64_t addr, const char *fn_name,
+             // The callee may have suspended somewhere below us. Return BEFORE
+             // the epilogue, so this frame stays on the call history for replay.
+             block = AddSuspendCheck(block);
+-            llvm::IRBuilder<> cont_ir(block);
+-            // call `_ecv_func_epilogue`
+-            cont_ir.CreateCall(module->getFunction("_ecv_func_epilogue"), {state_ptr, runtime_ptr});
++            if (inst.lift_config.inline_call_history) {
++              // Inline fast path; its slow arm is this same call (patch 0060).
++              block = EmitCallHistoryPop(block);
++              ir.SetInsertPoint(block);
++            } else {
++              llvm::IRBuilder<> cont_ir(block);
++              cont_ir.CreateCall(module->getFunction("_ecv_func_epilogue"),
++                                 {state_ptr, runtime_ptr});
++            }
+             lift_or_system_calling_bbs.insert(GetOrCreateNextBlock());
+           }
+ 
+diff --git a/lifter/Lift.cpp b/lifter/Lift.cpp
+index cb40816..a0bd43c 100644
+--- a/lifter/Lift.cpp
++++ b/lifter/Lift.cpp
+@@ -60,6 +60,13 @@ DEFINE_string(
+     "Whether the test mode is on or off");  // We use `test_mode` for not only test mode but also `no VRP` mode.
+ DEFINE_string(fork_emulation, "",
+               "enable the function of emulating fork syscall on emscripten browser.");
++DEFINE_string(inline_call_history, "0",
++              "Emit the guest call history inline instead of calling "
++              "_ecv_save_call_history / _ecv_func_epilogue at every guest BL. Requires a "
++              "runtime that publishes __ecv_ch_base/_len/_cap and __ecv_slow (ecvisor's "
++              "cshim does; elfconv's own runtime leaves them zero, which selects the "
++              "call path). OFF by default, and off is byte-identical to not having "
++              "this option at all.");
+ DEFINE_string(lift_range, "",
+               "Lift only functions whose entry address falls in one of these half-open guest "
+               "VMA ranges, as \"lo:hi[,lo:hi...]\". Discovery is unaffected: a skipped function "
+@@ -137,7 +144,8 @@ int main(int argc, char *argv[]) {
+   // Set various lifting config.
+   auto lift_config = LiftConfig(FLAGS_float_exception == "1",
+                                 FLAGS_norm_mode == "1" || FLAGS_fork_emulation == "1", arch_name,
+-                                FLAGS_fork_emulation == "1", !manager.elf_obj.is_stripped);
++                                FLAGS_fork_emulation == "1", !manager.elf_obj.is_stripped,
++                                FLAGS_inline_call_history == "1");
+ #if defined(PRINT_FUNC_ADDR)
+   if (FLAGS_dbg_fun_vma > 0) {
+     lift_config.dbg_fun_vma = FLAGS_dbg_fun_vma;
+diff --git a/runtime/VmIntrinsics.cpp b/runtime/VmIntrinsics.cpp
+index d5c0ced..941acfe 100644
+--- a/runtime/VmIntrinsics.cpp
++++ b/runtime/VmIntrinsics.cpp
+@@ -342,8 +342,41 @@ extern "C" uint8_t _ecv_suspended(RuntimeManager &rt_m) {
+ // ecvisor defines its own in runtime/cshim/ecv_globals.c; the two runtimes are
+ // linked separately and never together, so there is no duplicate symbol.
+ __attribute__((address_space(1))) int __ecv_unwinding;
++
++// The call-history globals the inlined fast path reads (patch 0060), for the
++// same reason: the codegen emits them unconditionally under --fork_emulation and
++// an undefined symbol breaks this link. Patch 0059 learned that the hard way --
++// `TestUpstreamRuntime` and `TestFusedDynamicProgram` both failed with
++// `undefined symbol: __ecv_unwinding` -- so 0060 ships its definitions with it.
++//
++// ZERO IS THE CORRECT VALUE HERE, not merely a safe one. The fast path is taken
++// only when `len < cap`, and this runtime never sets `cap`,
++// so `0 < 0` is false and every call takes the SLOW arm -- the original
++// `_ecv_save_call_history` / `_ecv_func_epilogue` defined above. The upstream
++// runtime therefore keeps its existing behaviour with no further change, purely
++// because a zero-initialised capacity means "no room".
++__attribute__((address_space(1))) int __ecv_ch_base;
++__attribute__((address_space(1))) int __ecv_ch_len;
++__attribute__((address_space(1))) int __ecv_ch_cap;
++// `__ecv_slow` is GONE from the emitted condition -- a zero capacity says the
++// same thing in one fewer global read per site. Kept defined so an object built
++// against the older patch still links.
++__attribute__((address_space(1))) int __ecv_slow;
+ #endif
+ 
++// The inline-capable call-history entry points, for the same link-safety reason
++// as everything above: a module built with `--inline-call-history` names them on
++// its slow arm, and an undefined symbol breaks this link. This runtime never
++// takes the inline path (its capacity stays zero), so they are the originals.
++extern "C" void _ecv_save_call_history_ic(State &state, RuntimeManager &rt_m, uint64_t func_addr,
++                                          uint64_t ret_addr) {
++  _ecv_save_call_history(state, rt_m, func_addr, ret_addr);
++}
++
++extern "C" void _ecv_func_epilogue_ic(State &state, RuntimeManager &rt_m) {
++  _ecv_func_epilogue(state, rt_m);
++}
++
+ extern "C" void _ecv_unreached(uint64_t value) {
+   elfconv_runtime_error("You must not reach this point. value: 0x%llx\n", value);
+ }

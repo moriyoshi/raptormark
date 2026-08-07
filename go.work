@@ -1,0 +1,41 @@
+// Workspace so one gate command can cover every module in the tree.
+//
+// tools/decode-oracle is a separate module for LICENSING reasons: it embeds
+// QEMU's decodetree tables (LGPL-2.1-or-later) and is licensed the same way,
+// while raptormark itself is Apache-2.0. Its nested go.mod is what keeps that
+// obligation out of the pipeline -- and it is also what made its tests
+// invisible to a repo-root `go test ./...`.
+//
+// ⚠️ A workspace does NOT make `./...` recursive across modules. Measured, not
+// assumed: with this file in place, `go list ./...` from the repo root still
+// returns zero decode-oracle packages, because a relative pattern is resolved
+// against the module you are standing in. What the workspace buys is that the
+// other module's packages are RESOLVABLE by module path from here, so the gate
+// names both:
+//
+//	go build ./... raptormark/tools/decode-oracle/...
+//	go vet   ./... raptormark/tools/decode-oracle/...
+//	go test  ./... raptormark/tools/decode-oracle/...
+//
+// ❌ Not `go test all`. In workspace mode `all` also pulls in dependencies --
+// 152 packages here, including kong -- so it would run third-party tests and
+// fail for reasons that are not ours.
+//
+// ⚠️ This changes which packages those commands VISIT. It does not change what
+// anything links. cmd/raptormark does not import the decode oracle, no
+// Apache-2.0 binary gains an LGPL dependency, and the two modules stay
+// separately licensed and separately distributable. Compiling a package during
+// a gate is not distributing a combined work.
+//
+// If you add a module, add it here: internal/builder's
+// TestWorkspaceCoversEveryModule fails otherwise, which is the point -- a
+// module missing from this file is silently ungated.
+//
+// GOWORK=off disables it, if you ever need to build a module in isolation.
+
+go 1.26.0
+
+use (
+	.
+	./tools/decode-oracle
+)

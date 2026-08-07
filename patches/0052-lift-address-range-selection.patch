@@ -1,0 +1,114 @@
+diff --git a/lifter/Lift.cpp b/lifter/Lift.cpp
+--- a/lifter/Lift.cpp
++++ b/lifter/Lift.cpp
+@@ -18,8 +18,11 @@
+ #include "remill/BC/TraceLifter.h"
+ #include "remill/BC/Util.h"
+ 
++#include <algorithm>
+ #include <chrono>
+ #include <cstdint>
++#include <utility>
++#include <vector>
+ #if defined(__linux__)
+ #  include <signal.h>
+ #  include <utils/Util.h>
+@@ -57,6 +60,10 @@
+     "Whether the test mode is on or off");  // We use `test_mode` for not only test mode but also `no VRP` mode.
+ DEFINE_string(fork_emulation, "",
+               "enable the function of emulating fork syscall on emscripten browser.");
++DEFINE_string(lift_range, "",
++              "Lift only functions whose entry address falls in one of these half-open guest "
++              "VMA ranges, as \"lo:hi[,lo:hi...]\". Discovery is unaffected: a skipped function "
++              "stays a known entry and is emitted as a declaration. Unset means lift all.");
+ DEFINE_string(shard, "",
+               "Lift only a subset of the functions, as \"i/N\" (0-based). Every shard still "
+               "runs the full SetELFData, so all shards share one entry set and make identical "
+@@ -189,6 +196,78 @@
+     return shard_n == 1 || shard_of(addr) % shard_n == shard_i;
+   };
+ 
++  // ADDRESS-RANGE SELECTION, the building block for lifting a library once and
++  // reusing it across every program of a closure.
++  //
++  // `internal/fuse.PlanLayout` gives every library one base across the whole
++  // closure, and patches/0046 names every lifted function from its address, so a
++  // library's lifted IR is identical in every program that links it. Measured on
++  // postgres, the library range is 54.7% of the emitted IR volume (and far more
++  // for a closure's smaller programs, whose own code is a sliver). Lifting it
++  // once needs a way to say WHICH addresses to lift.
++  //
++  // Ranges are guest VMAs, half-open [lo, hi), comma-separated, hex or decimal --
++  // the same shape `internal/fuse.FormatLibRanges` already emits for ecv-split.
++  // Empty means lift everything, so an invocation without the flag is unchanged.
++  //
++  // Skipping is done exactly as --shard does it, and for the same reason: a
++  // function outside the range stays in `disasm_funcs`, so `isFunctionEntry`
++  // still answers yes and a `b` to it is still recognised as a tail call rather
++  // than trace-extended into (patches/0022), while `get_trace_decl` emits a plain
++  // declaration that resolves at link time.
++  //
++  // WHAT THIS PATCH DOES NOT DO. The per-module tables -- the four
++  // `g_block_address_*` arrays and `_ecv_lifted_fun_ptrs` -- are built only from
++  // what was lifted, so a range-restricted module carries PARTIAL tables and is
++  // not runnable on its own. That is the same shape `patches/0030` foundered on.
++  // The difference is that it is now known to be a missing merge step rather than
++  // an impossible one: the runtime binary-searches those tables by VMA
++  // (`Context::block_address`, runtime/src/context.rs:3096), so two modules'
++  // tables can be concatenated, re-sorted and deduped. That merge is the next
++  // change; this one is only the ability to lift a subset.
++  std::vector<std::pair<uint64_t, uint64_t>> lift_ranges;
++  if (!FLAGS_lift_range.empty()) {
++    const std::string &spec = FLAGS_lift_range;
++    size_t pos = 0;
++    while (pos < spec.size()) {
++      size_t comma = spec.find(',', pos);
++      if (comma == std::string::npos) {
++        comma = spec.size();
++      }
++      std::string one = spec.substr(pos, comma - pos);
++      size_t colon = one.find(':');
++      if (colon == std::string::npos) {
++        elfconv_runtime_error("[ERROR] --lift_range wants \"lo:hi[,lo:hi...]\", got \"%s\".\n",
++                              one.c_str());
++      }
++      uint64_t lo = std::stoull(one.substr(0, colon), nullptr, 0);
++      uint64_t hi = std::stoull(one.substr(colon + 1), nullptr, 0);
++      if (hi <= lo) {
++        elfconv_runtime_error("[ERROR] --lift_range \"%s\" is empty or inverted.\n", one.c_str());
++      }
++      lift_ranges.emplace_back(lo, hi);
++      pos = comma + 1;
++    }
++    // Sorted so the lookup can stop early; ranges are few (31 libraries on the
++    // postgres closure) so a linear scan is already cheap, but an unsorted list
++    // would make the early exit wrong rather than slow.
++    std::sort(lift_ranges.begin(), lift_ranges.end());
++  }
++  auto in_range = [&](uint64_t addr) {
++    if (lift_ranges.empty()) {
++      return true;
++    }
++    for (const auto &r : lift_ranges) {
++      if (addr < r.first) {
++        return false; // sorted: no later range can contain it either
++      }
++      if (addr < r.second) {
++        return true;
++      }
++    }
++    return false;
++  };
++
+   ECV_PHASE_BEGIN();
+   do {
+     manager.rest_disasm_funcs.clear();
+@@ -200,7 +279,7 @@
+       // still answers yes for it, so a `b` to it is still recognised as a tail
+       // call rather than being trace-extended into (patches/0022), and
+       // get_trace_decl emits a plain declaration that resolves at link time.
+-      if (!in_shard(addr)) {
++      if (!in_shard(addr) || !in_range(addr)) {
+         continue;
+       }
+       addr_fun_name_map[addr] = dasm_func.func_name.c_str();

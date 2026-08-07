@@ -1,0 +1,116 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index d8cd032..4a2a8a3 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7769,6 +7769,44 @@ bool TryDecodeUSHL_ASISDSAME_ONLY(const InstData &data, Instruction &inst) {
+   return true;
+ }
+ 
++// raptormark: scalar (SISD) integer ADD and SUB, which were generated stubs
++// returning `false`.
++//
++// Found by REACHING them, not by counting: `ExecInitAgg+0x10e0` is
++// `5eff8421 add d1, d1, d31`, and it stopped `postgres --single` on a
++// `GROUP BY` -- a hash aggregate, which a plain `count(*)` does not plan. The
++// matching `sub d12, d12, d31` sits in `hash_agg_set_limits`. Two sites, one
++// query rung.
++//
++// ⚠️ Modelled as `kReg2D` with lane 1 zeroed, exactly like the USHL scalar form
++// above. These are SIMD-register operations, not GPR ones: `ADD Dd, Dn, Dm`
++// reads and writes the low 64 bits of a V register and ZEROES the upper 64.
++// Reading them as 64-bit GPR adds would give the right lane-0 answer and leave
++// the top half of the destination undisturbed, which is wrong and would show up
++// only where the register is later read as a full 128-bit vector.
++//
++// The ARM spec allows only size=3 (double) for these; the encoding's `size`
++// field is not otherwise consulted here because the dispatch table reaches this
++// decoder only for that form.
++
++// ADD  <V><d>, <V><n>, <V><m>
++bool TryDecodeADD_ASISDSAME_ONLY(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddRegOperand(inst, kActionWrite, kReg2D, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kReg2D, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kReg2D, kUseAsValue, data.Rm);
++  return true;
++}
++
++// SUB  <V><d>, <V><n>, <V><m>
++bool TryDecodeSUB_ASISDSAME_ONLY(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  AddRegOperand(inst, kActionWrite, kReg2D, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, kReg2D, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, kReg2D, kUseAsValue, data.Rm);
++  return true;
++}
++
+ // USHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ bool TryDecodeUSHL_ASIMDSAME_ONLY(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index 34730c3..82a002d 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -5040,9 +5040,7 @@ bool TryDecodeSQADD_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // SUB  <V><d>, <V><n>, <V><m>
+-bool TryDecodeSUB_ASISDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSUB_ASISDSAME_ONLY: implemented in Arch.cpp (scalar SISD integer add/sub).
+ 
+ // SWPAL SWPAL_32_memop:
+ //   0 x Rt       0
+@@ -19779,9 +19777,7 @@ bool TryDecodeFRSQRTE_ASIMDMISC_R(const InstData &, Instruction &) {
+ //  30 1
+ //  31 0
+ // ADD  <V><d>, <V><n>, <V><m>
+-bool TryDecodeADD_ASISDSAME_ONLY(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeADD_ASISDSAME_ONLY: implemented in Arch.cpp (scalar SISD integer add/sub).
+ 
+ // SABDL SABDL_asimddiff_L:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index 78f11b3..b1e8168 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -1227,6 +1227,36 @@ DEF_SEM_T(USHL_64B, VIu64v2 src, VIi64v2 shift_src) {
+ 
+ DEF_ISEL(USHL_ASISDSAME_ONLY) = USHL_64B;  // USHL  <V><d>, <V><n>, <V><m>
+ 
++// ADD/SUB  <V><d>, <V><n>, <V><m>  -- scalar (SISD), 64-bit only.
++//
++// Lane 1 is written as ZERO rather than left alone: an AArch64 write to a D
++// register clears the upper 64 bits of the V register. Preserving them instead
++// would be invisible in the arithmetic and wrong in the register file.
++namespace {
++
++DEF_SEM_T(ADD_Scalar64, VIu64v2 srcn, VIu64v2 srcm) {
++  auto n0 = UExtractVI64(UReadVI64(srcn), 0);
++  auto m0 = UExtractVI64(UReadVI64(srcm), 0);
++  VIu64v2 res = {};
++  res[0] = UAdd64(n0, m0);
++  res[1] = 0;
++  return res;
++}
++
++DEF_SEM_T(SUB_Scalar64, VIu64v2 srcn, VIu64v2 srcm) {
++  auto n0 = UExtractVI64(UReadVI64(srcn), 0);
++  auto m0 = UExtractVI64(UReadVI64(srcm), 0);
++  VIu64v2 res = {};
++  res[0] = USub64(n0, m0);
++  res[1] = 0;
++  return res;
++}
++
++}  // namespace
++
++DEF_ISEL(ADD_ASISDSAME_ONLY) = ADD_Scalar64;  // ADD  <V><d>, <V><n>, <V><m>
++DEF_ISEL(SUB_ASISDSAME_ONLY) = SUB_Scalar64;  // SUB  <V><d>, <V><n>, <V><m>
++
+ // USHL  <Vd>.<T>, <Vn>.<T>, <Vm>.<T>
+ namespace {
+ #define MAKE_USHL_VECTOR(esize) \

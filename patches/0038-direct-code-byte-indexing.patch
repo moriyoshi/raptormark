@@ -1,0 +1,87 @@
+diff --git a/lifter/TraceManager.cpp b/lifter/TraceManager.cpp
+--- a/lifter/TraceManager.cpp
++++ b/lifter/TraceManager.cpp
+@@ -88,13 +88,27 @@
+ 
+ bool AArch64TraceManager::TryReadExecutableByte(uint64_t addr, uint8_t *byte) {
+ 
+-  auto byte_it = memory.find(addr);
+-  if (byte_it != memory.end()) {
+-    *byte = byte_it->second;
+-    return true;
+-  } else {
++  // Consecutive reads land in the same section almost every time, so try the
++  // previous hit before searching.
++  if (last_code_range < code_ranges.size()) {
++    const auto &r = code_ranges[last_code_range];
++    if (addr >= r.vma && addr < r.vma + r.size) {
++      *byte = r.bytes[addr - r.vma];
++      return true;
++    }
++  }
++  auto it = std::upper_bound(code_ranges.begin(), code_ranges.end(), addr,
++                             [](uint64_t a, const CodeRange &r) { return a < r.vma; });
++  if (it == code_ranges.begin()) {
+     return false;
+   }
++  --it;
++  if (addr < it->vma + it->size) {
++    last_code_range = static_cast<size_t>(it - code_ranges.begin());
++    *byte = it->bytes[addr - it->vma];
++    return true;
++  }
++  return false;
+ }
+ 
+ std::string AArch64TraceManager::GetLiftedFuncName(uint64_t addr) {
+@@ -142,10 +156,13 @@
+ 
+   // Set memory of all code section bytes.
+   for (auto &[_, code_sec] : elf_obj.code_sections) {
+-    for (addr_t addr = code_sec.vma; addr < code_sec.vma + code_sec.size; addr++) {
+-      memory[addr] = code_sec.bytes[addr - code_sec.vma];
++    if (code_sec.size == 0 || !code_sec.bytes) {
++      continue;
+     }
++    code_ranges.push_back({code_sec.vma, code_sec.size, code_sec.bytes});
+   }
++  std::sort(code_ranges.begin(), code_ranges.end(),
++            [](const CodeRange &a, const CodeRange &b) { return a.vma < b.vma; });
+ 
+   // Make all disasmbled functions data depending on optimization mode.
+   if (elf_obj.able_vrp_opt) {
+@@ -237,10 +254,6 @@
+     while (ins_i < plt_section.size) {
+       auto b_entry = plt_section.vma + ins_i;
+       for (; ins_i < plt_section.size;) {
+-        memory[plt_section.vma + ins_i] = plt_section.bytes[ins_i];
+-        memory[plt_section.vma + ins_i + 1] = plt_section.bytes[ins_i + 1];
+-        memory[plt_section.vma + ins_i + 2] = plt_section.bytes[ins_i + 2];
+-        memory[plt_section.vma + ins_i + 3] = plt_section.bytes[ins_i + 3];
+         uint8_t *bts = plt_section.bytes + ins_i;
+         ins_i += AARCH64_OP_SIZE;
+         if ((bts[0] & 0x1f) == 0x00 && (bts[1] & 0xfc) == 0x00 && bts[2] == 0x1f &&
+diff --git a/lifter/TraceManager.h b/lifter/TraceManager.h
+--- a/lifter/TraceManager.h
++++ b/lifter/TraceManager.h
+@@ -58,7 +58,19 @@
+   void SetCommonVariousData();
+ 
+   BinaryLoader::ELFObject elf_obj;
+-  std::unordered_map<uintptr_t, uint8_t> memory;
++  // Guest code, indexed directly. This was one std::unordered_map entry PER
++  // BYTE, and TryReadExecutableByte hashed on every byte the lifter read: a
++  // fused bash's 2.00 MB of .text became ~2 million separately-allocated nodes,
++  // so each read was a cache miss. Stack sampling put 21 of 30 samples (70% of
++  // the lift) inside that lookup. The bytes are already contiguous in
++  // elf_obj.code_sections, so a range check plus pointer arithmetic does it.
++  struct CodeRange {
++    uintptr_t vma;
++    uint64_t size;
++    const uint8_t *bytes;
++  };
++  std::vector<CodeRange> code_ranges;  // sorted by vma, built once in SetELFData
++  size_t last_code_range = 0;  // instruction fetches walk forward, so cache the last hit
+   std::unordered_map<uintptr_t, llvm::Function *> traces;
+   std::map<uintptr_t, DisasmFunc> disasm_funcs;
+   std::map<uintptr_t, DisasmFunc> rest_disasm_funcs;

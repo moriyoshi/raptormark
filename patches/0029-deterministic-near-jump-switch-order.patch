@@ -1,0 +1,37 @@
+diff --git a/backend/remill/lib/BC/ForkEmulation.cpp b/backend/remill/lib/BC/ForkEmulation.cpp
+--- a/backend/remill/lib/BC/ForkEmulation.cpp
++++ b/backend/remill/lib/BC/ForkEmulation.cpp
+@@ -219,15 +219,27 @@
+     // must have UNIQUE case values -- LLVM 22's bitcode writer aborts on a duplicate
+     // ("Duplicate integer as switch case") where LLVM 16 silently tolerated it (postgres,
+     // JOURNAL 5c6). A VMA maps to exactly one block, so keeping the first case is correct.
+-    std::set<uint64_t> added_case_vmas;
++    //
++    // ORDER BY case value, too. `lift_or_system_calling_bbs` is a std::set<llvm::BasicBlock *>,
++    // so it iterates in POINTER order: the cases came out in heap-address order, and the lifted
++    // module therefore differed between two lifts of the SAME input. Measured before this patch
++    // -- three lifts of dash.fused produced three bitcode hashes at an identical 29541888 bytes,
++    // whose only IR difference was switch cases changing position (206 lines of a 210 MB .ll,
++    // with the same 7914 symbols emitted in the same order). Semantically it is noise, since a
++    // SwitchInst is an unordered set of unique cases -- but it defeats any content-addressed
++    // cache keyed on the lifted IR, and it makes a build irreproducible for no benefit.
++    //
++    // A std::map keyed by the VMA does the dedupe and fixes the order in one structure:
++    // emplace keeps the first block seen for a repeated VMA, exactly as the std::set did.
++    std::map<uint64_t, llvm::BasicBlock *> switch_cases;
+     for (auto t_bb : lift_or_system_calling_bbs) {
+-      uint64_t vma = rev_lifted_block_map.at(t_bb);
+-      if (added_case_vmas.insert(vma).second)
+-        near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, vma), t_bb);
++      switch_cases.emplace(rev_lifted_block_map.at(t_bb), t_bb);
+     }
+     // Add entry pc (skip if a return site already registered this VMA -> same entry block).
+-    if (added_case_vmas.insert(trace_addr).second)
+-      near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, trace_addr), org_first_bb);
++    switch_cases.emplace(trace_addr, org_first_bb);
++    for (const auto &[vma, t_bb] : switch_cases) {
++      near_switch_jump->addCase(llvm::ConstantInt::get(u64ty, vma), t_bb);
++    }
+   }
+ 
+   // Update cache.

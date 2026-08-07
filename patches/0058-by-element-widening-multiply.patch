@@ -1,0 +1,278 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index 4decffb..51da5e6 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -7853,6 +7853,84 @@ bool TryDecodeSADALP_ASIMDMISC_P(const InstData &data, Instruction &inst) {
+   return TryDecodeADDLP_ASIMDMISC(data, inst, true);
+ }
+ 
++// {S,U}MLAL{2} / {S,U}MLSL{2} / {S,U}MULL{2}
++//   <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]  -- the BY-ELEMENT widening
++// multiplies, where the multiplier is one lane of Vm broadcast across the
++// operation.
++//
++// Patch 0051 implemented the ASIMDDIFF register-register forms and described
++// itself as covering "the widening multiply family". It did not: these are a
++// separate encoding class with a separate decoder, and the crypto image has 557
++// undecodable sites of `umlal <Vd>.2d, <Vn>.2s, <Vm>.s[i]` alone. Found by the
++// lift-time report of patch 0057, not by a guest dying on one.
++//
++// Two things differ from every other by-element decoder here:
++//
++//   - the ELEMENT register is read as a FULL 128-bit view regardless of Q,
++//     because the index addresses the whole register. `umlal v13.2d, v29.2s,
++//     v3.s[3]` is real code from libcrypto: a 64-bit source arrangement naming
++//     lane 3 of the element register. `ByElementIndexFits` must therefore NOT
++//     be applied -- it exists for the same-arrangement FP forms, where a 64-bit
++//     view genuinely cannot reach lanes 2 and 3.
++//   - how the index and the element register split the M bit depends on SIZE.
++//     For 16-bit elements the index is H:L:M and the register is the bare 4-bit
++//     Rm; for 32-bit elements the index is H:L and the register is M:Rm. Using
++//     one rule for both silently reads the wrong register for V16-V31 -- the
++//     exact defect patch 0045 documents.
++static bool TryDecodeMLXL_ASIMDELEM(const InstData &data, Instruction &inst, bool accumulate) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  int index;
++  uint64_t s_esize;
++  aarch64::RegNum elem_reg;
++  if (0b01 == data.size) {
++    s_esize = 16;
++    index = (static_cast<int>(data.H) << 2) | (static_cast<int>(data.L) << 1) |
++            static_cast<int>(data.M);
++    elem_reg = static_cast<aarch64::RegNum>(data.Rm);  // M is part of the index here
++  } else if (0b10 == data.size) {
++    s_esize = 32;
++    index = (static_cast<int>(data.H) << 1) | static_cast<int>(data.L);
++    elem_reg = ByElementRegNum(data);  // M:Rm -- see ByElementRegNum
++  } else {
++    return false;  // size 00 and 11 are unallocated for the widening forms
++  }
++  const uint64_t d_esize = s_esize * 2;
++  const uint64_t s_tsize = data.Q ? 128 : 64;
++  AddArrangementSpecifierUSHLL(inst, 128, d_esize, s_tsize, s_esize);
++  auto d_rclass = ArrangementRegClass(128, d_esize);
++  auto s_rclass = ArrangementRegClass(s_tsize, s_esize);
++  auto e_rclass = ArrangementRegClass(128, s_esize);
++  AddRegOperand(inst, accumulate ? kActionReadWrite : kActionWrite, d_rclass, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, s_rclass, kUseAsValue, data.Rn);
++  AddRegOperand(inst, kActionRead, e_rclass, kUseAsValue, elem_reg);
++  AddImmOperand(inst, index, kUnsigned, 32);
++  return true;
++}
++
++bool TryDecodeUMLAL_ASIMDELEM_L(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXL_ASIMDELEM(data, inst, true);
++}
++
++bool TryDecodeUMLSL_ASIMDELEM_L(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXL_ASIMDELEM(data, inst, true);
++}
++
++bool TryDecodeSMLAL_ASIMDELEM_L(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXL_ASIMDELEM(data, inst, true);
++}
++
++bool TryDecodeSMLSL_ASIMDELEM_L(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXL_ASIMDELEM(data, inst, true);
++}
++
++bool TryDecodeUMULL_ASIMDELEM_L(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXL_ASIMDELEM(data, inst, false);
++}
++
++bool TryDecodeSMULL_ASIMDELEM_L(const InstData &data, Instruction &inst) {
++  return TryDecodeMLXL_ASIMDELEM(data, inst, false);
++}
++
+ // SADDL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+ bool TryDecodeSADDL_ASIMDDIFF_L(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index f15dc14..2accc71 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -1282,9 +1282,7 @@ bool TryDecodeFMIN_D_FLOATDP2(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+-bool TryDecodeUMLSL_ASIMDELEM_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUMLSL_ASIMDELEM_L implemented in Arch.cpp.
+ 
+ // FMAXNM FMAXNM_asimdsamefp16_only:
+ //   0 x Rd       0
+@@ -10207,9 +10205,7 @@ bool TryDecodeTBX_ASIMDTBL_L1_1(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+-bool TryDecodeUMLAL_ASIMDELEM_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUMLAL_ASIMDELEM_L implemented in Arch.cpp.
+ 
+ // CMLE CMLE_asisdmisc_Z:
+ //   0 x Rd       0
+@@ -12439,9 +12435,7 @@ bool TryDecodeCMGT_ASISDMISC_Z(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SMLAL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+-bool TryDecodeSMLAL_ASIMDELEM_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSMLAL_ASIMDELEM_L implemented in Arch.cpp.
+ 
+ // STCLR STCLR_32S_memop:
+ //   0 1 Rt       0
+@@ -21495,9 +21489,7 @@ bool TryDecodeSQSHLU_ASIMDSHF_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // UMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+-bool TryDecodeUMULL_ASIMDELEM_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeUMULL_ASIMDELEM_L implemented in Arch.cpp.
+ 
+ // SWPAB SWPAB_32_memop:
+ //   0 x Rt       0
+@@ -24236,9 +24228,7 @@ bool TryDecodePMUL_ASIMDSAME_ONLY(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SMLSL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+-bool TryDecodeSMLSL_ASIMDELEM_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSMLSL_ASIMDELEM_L implemented in Arch.cpp.
+ 
+ // SUB NEG_SUB_32_addsub_shift:
+ //   0 x Rd       0
+@@ -31839,9 +31829,7 @@ bool TryDecodeRSUBHN_ASIMDDIFF_N(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // SMULL{2}  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+-bool TryDecodeSMULL_ASIMDELEM_L(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeSMULL_ASIMDELEM_L implemented in Arch.cpp.
+ 
+ // SUQADD SUQADD_asisdmisc_R:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index 2b9f370..f5bd94c 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -2534,6 +2534,83 @@ ECV_MAKE_USUBL(32, 64)
+ 
+ #undef ECV_MAKE_USUBL
+ 
++// The BY-ELEMENT widening multiplies: one lane of the element register is the
++// multiplier for every lane of the operation.
++//
++// Widened BEFORE the multiply, same as MAKE_MULL above and for the same reason.
++// The element operand is a full 128-bit vector, so `idx` may legitimately reach
++// lanes the SOURCE arrangement does not have -- see the decoder.
++#define ECV_MAKE_MLXL_ELEM(name, rd, ty, op, s_esize, d_esize) \
++  template <typename D, typename S, typename E> \
++  DEF_SEM_T(name##_##s_esize, D dst, S srcn, E srcm, I32 imm) { \
++    auto idx = Read(imm); \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    auto m = ty##d_esize##_t(srcm_v[idx]); \
++    D res = rd##ReadVI##d_esize(dst); \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] op ty##d_esize##_t(srcn_v[i]) * m; \
++    } \
++    return res; \
++  } \
++  template <typename D, typename S, typename E> \
++  DEF_SEM_T(name##2_##s_esize, D dst, S srcn, E srcm, I32 imm) { \
++    auto idx = Read(imm); \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    auto m = ty##d_esize##_t(srcm_v[idx]); \
++    D res = rd##ReadVI##d_esize(dst); \
++    auto res_len = GetVectorElemsNum(res); \
++    _Pragma("unroll") for (size_t i = 0; i < res_len; i++) { \
++      res[i] op ty##d_esize##_t(srcn_v[i + res_len]) * m; \
++    } \
++    return res; \
++  }
++
++// MULL overwrites rather than accumulating, so its destination is not read.
++#define ECV_MAKE_MULL_ELEM(name, rd, ty, s_esize, d_esize) \
++  template <typename D, typename S, typename E> \
++  DEF_SEM_T(name##_##s_esize, S srcn, E srcm, I32 imm) { \
++    auto idx = Read(imm); \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    auto m = ty##d_esize##_t(srcm_v[idx]); \
++    D res{}; \
++    _Pragma("unroll") for (size_t i = 0; i < GetVectorElemsNum(res); i++) { \
++      res[i] = ty##d_esize##_t(srcn_v[i]) * m; \
++    } \
++    return res; \
++  } \
++  template <typename D, typename S, typename E> \
++  DEF_SEM_T(name##2_##s_esize, S srcn, E srcm, I32 imm) { \
++    auto idx = Read(imm); \
++    auto srcn_v = rd##ReadVI##s_esize(srcn); \
++    auto srcm_v = rd##ReadVI##s_esize(srcm); \
++    auto m = ty##d_esize##_t(srcm_v[idx]); \
++    D res{}; \
++    auto res_len = GetVectorElemsNum(res); \
++    _Pragma("unroll") for (size_t i = 0; i < res_len; i++) { \
++      res[i] = ty##d_esize##_t(srcn_v[i + res_len]) * m; \
++    } \
++    return res; \
++  }
++
++ECV_MAKE_MLXL_ELEM(UMLALE, U, uint, +=, 16, 32)
++ECV_MAKE_MLXL_ELEM(UMLALE, U, uint, +=, 32, 64)
++ECV_MAKE_MLXL_ELEM(UMLSLE, U, uint, -=, 16, 32)
++ECV_MAKE_MLXL_ELEM(UMLSLE, U, uint, -=, 32, 64)
++ECV_MAKE_MLXL_ELEM(SMLALE, S, int, +=, 16, 32)
++ECV_MAKE_MLXL_ELEM(SMLALE, S, int, +=, 32, 64)
++ECV_MAKE_MLXL_ELEM(SMLSLE, S, int, -=, 16, 32)
++ECV_MAKE_MLXL_ELEM(SMLSLE, S, int, -=, 32, 64)
++ECV_MAKE_MULL_ELEM(UMULLE, U, uint, 16, 32)
++ECV_MAKE_MULL_ELEM(UMULLE, U, uint, 32, 64)
++ECV_MAKE_MULL_ELEM(SMULLE, S, int, 16, 32)
++ECV_MAKE_MULL_ELEM(SMULLE, S, int, 32, 64)
++
++#undef ECV_MAKE_MLXL_ELEM
++#undef ECV_MAKE_MULL_ELEM
++
+ MAKE_MULL(UMULL, U, uint, 8, 16);
+ MAKE_MULL(UMULL, U, uint, 16, 32);
+ MAKE_MULL(UMULL, U, uint, 32, 64);
+@@ -2613,6 +2690,30 @@ DEF_ISEL(USUBL_ASIMDDIFF_L_4S4H) = USUBL_16<VIu32v4, VIu16v4>;  // USUBL  <Vd>.<
+ DEF_ISEL(USUBL_ASIMDDIFF_L_4S8H) = USUBL2_16<VIu32v4, VIu16v8>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+ DEF_ISEL(USUBL_ASIMDDIFF_L_2D2S) = USUBL_32<VIu64v2, VIu32v2>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
+ DEF_ISEL(USUBL_ASIMDDIFF_L_2D4S) = USUBL2_32<VIu64v2, VIu32v4>;  // USUBL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Tb>
++DEF_ISEL(UMLAL_ASIMDELEM_L_4S4H) = UMLALE_16<VIu32v4, VIu16v4, VIu16v8>;  // UMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLAL_ASIMDELEM_L_4S8H) = UMLALE2_16<VIu32v4, VIu16v8, VIu16v8>;  // UMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLAL_ASIMDELEM_L_2D2S) = UMLALE_32<VIu64v2, VIu32v2, VIu32v4>;  // UMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLAL_ASIMDELEM_L_2D4S) = UMLALE2_32<VIu64v2, VIu32v4, VIu32v4>;  // UMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLSL_ASIMDELEM_L_4S4H) = UMLSLE_16<VIu32v4, VIu16v4, VIu16v8>;  // UMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLSL_ASIMDELEM_L_4S8H) = UMLSLE2_16<VIu32v4, VIu16v8, VIu16v8>;  // UMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLSL_ASIMDELEM_L_2D2S) = UMLSLE_32<VIu64v2, VIu32v2, VIu32v4>;  // UMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMLSL_ASIMDELEM_L_2D4S) = UMLSLE2_32<VIu64v2, VIu32v4, VIu32v4>;  // UMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLAL_ASIMDELEM_L_4S4H) = SMLALE_16<VIi32v4, VIi16v4, VIi16v8>;  // SMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLAL_ASIMDELEM_L_4S8H) = SMLALE2_16<VIi32v4, VIi16v8, VIi16v8>;  // SMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLAL_ASIMDELEM_L_2D2S) = SMLALE_32<VIi64v2, VIi32v2, VIi32v4>;  // SMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLAL_ASIMDELEM_L_2D4S) = SMLALE2_32<VIi64v2, VIi32v4, VIi32v4>;  // SMLAL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLSL_ASIMDELEM_L_4S4H) = SMLSLE_16<VIi32v4, VIi16v4, VIi16v8>;  // SMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLSL_ASIMDELEM_L_4S8H) = SMLSLE2_16<VIi32v4, VIi16v8, VIi16v8>;  // SMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLSL_ASIMDELEM_L_2D2S) = SMLSLE_32<VIi64v2, VIi32v2, VIi32v4>;  // SMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMLSL_ASIMDELEM_L_2D4S) = SMLSLE2_32<VIi64v2, VIi32v4, VIi32v4>;  // SMLSL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMULL_ASIMDELEM_L_4S4H) = UMULLE_16<VIu32v4, VIu16v4, VIu16v8>;  // UMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMULL_ASIMDELEM_L_4S8H) = UMULLE2_16<VIu32v4, VIu16v8, VIu16v8>;  // UMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMULL_ASIMDELEM_L_2D2S) = UMULLE_32<VIu64v2, VIu32v2, VIu32v4>;  // UMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(UMULL_ASIMDELEM_L_2D4S) = UMULLE2_32<VIu64v2, VIu32v4, VIu32v4>;  // UMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMULL_ASIMDELEM_L_4S4H) = SMULLE_16<VIi32v4, VIi16v4, VIi16v8>;  // SMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMULL_ASIMDELEM_L_4S8H) = SMULLE2_16<VIi32v4, VIi16v8, VIi16v8>;  // SMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMULL_ASIMDELEM_L_2D2S) = SMULLE_32<VIi64v2, VIi32v2, VIi32v4>;  // SMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
++DEF_ISEL(SMULL_ASIMDELEM_L_2D4S) = SMULLE2_32<VIi64v2, VIi32v4, VIi32v4>;  // SMULL  <Vd>.<Ta>, <Vn>.<Tb>, <Vm>.<Ts>[<index>]
+ DEF_ISEL(UMULL_ASIMDDIFF_L_8H8B) = UMULL_8<VIu16v8, VIu8v8>;
+ DEF_ISEL(UMULL_ASIMDDIFF_L_4S4H) = UMULL_16<VIu32v4, VIu16v4>;
+ DEF_ISEL(UMULL_ASIMDDIFF_L_2D2S) = UMULL_32<VIu64v2, VIu32v2>;

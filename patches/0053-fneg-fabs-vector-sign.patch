@@ -1,0 +1,156 @@
+diff --git a/backend/remill/lib/Arch/AArch64/Arch.cpp b/backend/remill/lib/Arch/AArch64/Arch.cpp
+index 4569cf9..eed072b 100644
+--- a/backend/remill/lib/Arch/AArch64/Arch.cpp
++++ b/backend/remill/lib/Arch/AArch64/Arch.cpp
+@@ -3744,6 +3744,45 @@ bool TryDecodeFRINTX_ASIMDMISC_R(const InstData &data, Instruction &inst) {
+   return TryDecodeFRINT_ASIMDMISC(data, inst);
+ }
+ 
++// FNEG/FABS  <Vd>.<T>, <Vn>.<T> -- the VECTOR (ASIMD two-register misc) sign
++// operations. Both were `return false` stubs, so a guest that negated a float
++// vector met `__ecv_warning` and took SIGILL.
++//
++// python:3-slim stops on `fneg v29.2d, v29.2d` inside `_PyCode_ConstantKey`,
++// which is CPython's `copysign` on a double: build a sign mask with FNEG of
++// zero, then blend with BIF. BIF was already implemented, so this pair is what
++// the whole sequence was missing. FABS goes in with it because it is the same
++// encoding with U=0 -- one lift, not two.
++//
++// Operands are FRINTM_ASIMDMISC_R's: one arrangement, the same register class
++// for source and destination. NO FPSR status operand: these do not read or
++// write the floating-point exception flags, because they are not arithmetic --
++// see the semantics.
++//
++// `sz && !Q` is the 1D arrangement, which is unallocated: 64-bit elements
++// require Q=1.
++static bool TryDecodeFSIGN_ASIMDMISC(const InstData &data, Instruction &inst) {
++  inst.sema_func_arg_type = SemaFuncArgType::Nothing;
++  if (data.sz && !data.Q) {
++    return false;
++  }
++  const uint64_t datasize = data.Q ? 128 : 64;
++  const uint64_t esize = data.sz ? 64 : 32;
++  AddArrangementSpecifier(inst, datasize, esize);
++  auto r_class = ArrangementRegClass(datasize, esize);
++  AddRegOperand(inst, kActionWrite, r_class, kUseAsValue, data.Rd);
++  AddRegOperand(inst, kActionRead, r_class, kUseAsValue, data.Rn);
++  return true;
++}
++
++bool TryDecodeFNEG_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFSIGN_ASIMDMISC(data, inst);
++}
++
++bool TryDecodeFABS_ASIMDMISC_R(const InstData &data, Instruction &inst) {
++  return TryDecodeFSIGN_ASIMDMISC(data, inst);
++}
++
+ // TBL  <Vd>.<Ta>, { <Vn>.16B }, <Vm>.<Ta>
+ bool TryDecodeTBL_ASIMDTBL_L1_1(const InstData &data, Instruction &inst) {
+   inst.sema_func_arg_type = SemaFuncArgType::Nothing;
+diff --git a/backend/remill/lib/Arch/AArch64/Decode.cpp b/backend/remill/lib/Arch/AArch64/Decode.cpp
+index b10f445..3235362 100644
+--- a/backend/remill/lib/Arch/AArch64/Decode.cpp
++++ b/backend/remill/lib/Arch/AArch64/Decode.cpp
+@@ -528,9 +528,7 @@ bool TryDecodeFABS_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FABS  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFABS_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFABS_ASIMDMISC_R implemented in Arch.cpp.
+ 
+ // SCVTF SCVTF_asisdshf_C:
+ //   0 x Rd       0
+@@ -22409,9 +22407,7 @@ bool TryDecodeFNEG_ASIMDMISCFP16_R(const InstData &, Instruction &) {
+ //  30 x Q        0
+ //  31 0
+ // FNEG  <Vd>.<T>, <Vn>.<T>
+-bool TryDecodeFNEG_ASIMDMISC_R(const InstData &, Instruction &) {
+-  return false;
+-}
++// TryDecodeFNEG_ASIMDMISC_R implemented in Arch.cpp.
+ 
+ // ADDHN ADDHN_asimddiff_N:
+ //   0 x Rd       0
+diff --git a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+index 9693376..d70ec0c 100644
+--- a/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
++++ b/backend/remill/lib/Arch/AArch64/Semantics/SIMD.cpp
+@@ -977,6 +977,75 @@ DEF_ISEL(NOT_ASIMDMISC_R_16B) = NOT_8<VIu8v16>;  // NOT  <Vd>.<T>, <Vn>.<T>
+ 
+ namespace {
+ 
++// FNEG/FABS (vector): flip or clear each lane's SIGN BIT.
++//
++// These are bit operations, not arithmetic, and the distinction is the whole
++// point. ARM defines FPNeg as "invert bit[N-1]" and FPAbs as "clear bit[N-1]"
++// on the ENCODING, so:
++//
++//   * FNEG(+0.0) is -0.0. Implemented as `0.0 - x` it would be +0.0, and the
++//     one caller that matters here is `copysign`, whose entire job is the sign
++//     of a zero.
++//   * a NaN keeps its payload and its signalling-ness. `0.0 - NaN` may quiet a
++//     signalling NaN and is free to pick a different payload.
++//   * no FPSR exception flag is ever raised, which is why the decoder attaches
++//     no FPSR status operand.
++//
++// Reading the lanes as unsigned integers is therefore not a shortcut around the
++// float semantics; it IS the float semantics.
++
++// The sign bit of an IEEE-754 binary32 / binary64 lane.
++constexpr uint32_t kFPSign32 = uint32_t(1) << 31;
++constexpr uint64_t kFPSign64 = uint64_t(1) << 63;
++
++template <typename S>
++DEF_SEM_T(FNEG_Vec_32, S src) {
++  auto res = UReadVI32(src);
++  for (size_t i = 0; i < GetVectorElemsNum(res); i++) {
++    res[i] = res[i] ^ kFPSign32;
++  }
++  return res;
++}
++
++template <typename S>
++DEF_SEM_T(FNEG_Vec_64, S src) {
++  auto res = UReadVI64(src);
++  for (size_t i = 0; i < GetVectorElemsNum(res); i++) {
++    res[i] = res[i] ^ kFPSign64;
++  }
++  return res;
++}
++
++template <typename S>
++DEF_SEM_T(FABS_Vec_32, S src) {
++  auto res = UReadVI32(src);
++  for (size_t i = 0; i < GetVectorElemsNum(res); i++) {
++    res[i] = res[i] & ~kFPSign32;
++  }
++  return res;
++}
++
++template <typename S>
++DEF_SEM_T(FABS_Vec_64, S src) {
++  auto res = UReadVI64(src);
++  for (size_t i = 0; i < GetVectorElemsNum(res); i++) {
++    res[i] = res[i] & ~kFPSign64;
++  }
++  return res;
++}
++
++}  // namespace
++
++DEF_ISEL(FNEG_ASIMDMISC_R_2S) = FNEG_Vec_32<VIu32v2>;  // FNEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(FNEG_ASIMDMISC_R_4S) = FNEG_Vec_32<VIu32v4>;  // FNEG  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(FNEG_ASIMDMISC_R_2D) = FNEG_Vec_64<VIu64v2>;  // FNEG  <Vd>.<T>, <Vn>.<T>
++
++DEF_ISEL(FABS_ASIMDMISC_R_2S) = FABS_Vec_32<VIu32v2>;  // FABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(FABS_ASIMDMISC_R_4S) = FABS_Vec_32<VIu32v4>;  // FABS  <Vd>.<T>, <Vn>.<T>
++DEF_ISEL(FABS_ASIMDMISC_R_2D) = FABS_Vec_64<VIu64v2>;  // FABS  <Vd>.<T>, <Vn>.<T>
++
++namespace {
++
+ template <typename T, size_t count>
+ DEF_SEM_T(EXT, T src1, T src2, I32 src3) {
+   auto lsb = Read(src3);

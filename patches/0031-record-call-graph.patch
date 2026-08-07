@@ -1,0 +1,57 @@
+diff --git a/backend/remill/lib/BC/TraceLifter.cpp b/backend/remill/lib/BC/TraceLifter.cpp
+--- a/backend/remill/lib/BC/TraceLifter.cpp
++++ b/backend/remill/lib/BC/TraceLifter.cpp
+@@ -43,6 +43,29 @@
+ 
+ namespace remill {
+ 
++// Call-graph edge recording, for the Go-orchestrated pipeline.
++//
++// ECV_GRAPH_OUT names a file to write "<caller> <callee>" hex pairs to, one per
++// line. Sharding the lift by function ENTRY does not divide the work -- measured
++// on a fused bash, two 32-way shards each lifted ~2,100 functions of which 1,728
++// were the SAME functions, because Lift() walks a trace work-list and every
++// closure reaches libc. Partitioning has to be computed over the call graph
++// instead, and this is where the edges already exist: every
++// trace_work_list.insert below is a function-level edge.
++//
++// Recording is passive and costs nothing when the variable is unset.
++static void EcvRecordCallGraphEdge(uint64_t from, uint64_t to) {
++  static FILE *const out = [] {
++    const char *path = getenv("ECV_GRAPH_OUT");
++    return path ? fopen(path, "w") : nullptr;
++  }();
++  if (out) {
++    fprintf(out, "%llx %llx\n", (unsigned long long) from, (unsigned long long) to);
++  }
++}
++
++
++
+ #if defined(OPT_REAL_REGS_DEBUG)
+ #  define DEBUG_PC_AND_REGISTERS(...) InsertDebugVmaAndRegisters(__VA_ARGS__)
+ #  define VAR_NAME(ecv_reg, ecv_reg_class) \
+@@ -557,6 +580,7 @@
+                 inst.branch_taken_pc < manager.GetFuncVMA_E(trace_addr));
+ 
+           if (leaves_func) {
++            EcvRecordCallGraphEdge(trace_addr, inst.branch_taken_pc);
+             trace_work_list.insert(inst.branch_taken_pc);
+             llvm::IRBuilder<> ir(block);
+             llvm::CallInst *lifted_func_call = AddCall(
+@@ -733,6 +757,7 @@
+           }
+           // It may be unnecessary to check this condition.
+           // if (inst.branch_not_taken_pc != inst.branch_taken_pc)
++          EcvRecordCallGraphEdge(trace_addr, inst.branch_taken_pc);
+           trace_work_list.insert(inst.branch_taken_pc);
+           llvm::IRBuilder<> ir(block);
+ 
+@@ -797,6 +822,7 @@
+           ConditionalBranchWithSaveParents(taken_block, not_taken_block, LoadBranchTaken(block),
+                                            block);
+ 
++          EcvRecordCallGraphEdge(trace_addr, inst.branch_taken_pc);
+           trace_work_list.insert(inst.branch_taken_pc);
+           auto target_trace = get_trace_decl(inst.branch_taken_pc);
+ 
